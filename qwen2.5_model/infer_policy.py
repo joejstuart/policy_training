@@ -781,14 +781,14 @@ Examples (using base model only - for comparison):
     if not args.no_context:
         print("Initializing library context system...")
         try:
-            mapper = LibraryMapper(repo_root)
-            mapper.build_mappings()
+            # mapper = LibraryMapper(repo_root)
+            # mapper.build_mappings()
             
-            indexer = LibraryIndexer(repo_root, mapper)
-            # Scan for usage examples (slower but provides better context)
-            indexer.index_all_libraries(scan_usage=True)
+            # indexer = LibraryIndexer(repo_root, mapper)
+            # # Scan for usage examples (slower but provides better context)
+            # indexer.index_all_libraries(scan_usage=True)
             
-            builder = SmartContextBuilder(indexer, mapper, max_tokens=500)
+            # builder = SmartContextBuilder(indexer, mapper, max_tokens=500)
             print(f"✓ Indexed {len(indexer.index)} helpers")
             print()
         except Exception as e:
