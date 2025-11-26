@@ -784,12 +784,12 @@ Examples (using base model only - for comparison):
             mapper = LibraryMapper(repo_root)
             mapper.build_mappings()
             
-            indexer = LibraryIndexer(repo_root, mapper)
-            # Scan for usage examples (slower but provides better context)
-            indexer.index_all_libraries(scan_usage=True)
+            # indexer = LibraryIndexer(repo_root, mapper)
+            # # Scan for usage examples (slower but provides better context)
+            # indexer.index_all_libraries(scan_usage=True)
             
-            builder = SmartContextBuilder(indexer, mapper, max_tokens=500)
-            print(f"✓ Indexed {len(indexer.index)} helpers")
+            # builder = SmartContextBuilder(indexer, mapper, max_tokens=500)
+            # print(f"✓ Indexed {len(indexer.index)} helpers")
             print()
         except Exception as e:
             print(f"⚠ Warning: Failed to initialize context system: {e}")
