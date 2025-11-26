@@ -1,0 +1,20 @@
+[project]
+name = "qwen2.5-policy-training"
+version = "0.1.0"
+description = "Training scripts for fine-tuning Qwen2.5-1.5B on Rego policy rules"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "transformers>=4.40.0",
+    "peft>=0.10.0",
+    "torch>=2.1.0",
+    "accelerate>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = []
+
+# This is a script-only project, not a package
+# Configure hatchling to not try to build a package
+[tool.hatch.build.targets.wheel]
+packages = []
+
