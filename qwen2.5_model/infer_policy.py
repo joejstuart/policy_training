@@ -71,8 +71,19 @@ def load_policy_model(base_model: str, model_dir: str = None, device: str = "mps
     Returns:
         (tokenizer, model, device) tuple
     """
-    # Detect device
-    if device == "mps" and not torch.backends.mps.is_available():
+    # Auto-detect device if requested
+    if device == "auto":
+        if torch.cuda.is_available():
+            device = "cuda"
+            print(f"✓ Auto-detected CUDA (GPU: {torch.cuda.get_device_name(0)})")
+        elif torch.backends.mps.is_available():
+            device = "mps"
+            print("✓ Auto-detected MPS (Apple Silicon)")
+        else:
+            device = "cpu"
+            print("⚠ No GPU available, using CPU")
+    # Detect device availability for explicit choices
+    elif device == "mps" and not torch.backends.mps.is_available():
         print("⚠ MPS not available, falling back to CPU")
         device = "cpu"
     elif device == "cuda" and not torch.cuda.is_available():
@@ -668,9 +679,9 @@ Examples (using base model only - for comparison):
     parser.add_argument(
         "--device",
         type=str,
-        default="mps",
-        choices=["mps", "cpu", "cuda"],
-        help="Device to run on (default: mps for Apple Silicon)",
+        default="auto",
+        choices=["auto", "mps", "cpu", "cuda"],
+        help="Device to run on (default: auto - detects CUDA, then MPS, then CPU)",
     )
     parser.add_argument(
         "--instruction",
