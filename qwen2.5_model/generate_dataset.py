@@ -358,7 +358,7 @@ def estimate_tokens(text: str) -> int:
 
 
 def validate_rego_code(code: str, package: str = "", imports: List[str] = None, test_file: Optional[Path] = None) -> Tuple[bool, str, str]:
-    """Validate Rego code using opa parse, opa fmt, regal, and optionally opa test.
+    """Validate Rego code using opa parse, regal, and optionally opa test.
     
     Returns: (is_valid, formatted_code, error_message)
     """
@@ -400,32 +400,7 @@ def validate_rego_code(code: str, package: str = "", imports: List[str] = None, 
         except Exception as e:
             errors.append(f"opa parse error: {e}")
         
-        # 2. opa fmt (formatting check and format)
-        try:
-            # Always format the file (opa fmt modifies in place)
-            fmt_result = subprocess.run(
-                ["opa", "fmt", str(tmp_path)],
-                capture_output=True,
-                timeout=5
-            )
-            if fmt_result.returncode == 0:
-                formatted_complete = tmp_path.read_text()
-                # Extract just the rule code (skip package and imports)
-                lines = formatted_complete.split('\n')
-                # Find where the actual rule code starts (after package/imports)
-                rule_start = 0
-                for i, line in enumerate(lines):
-                    if line.strip() and not line.strip().startswith("package") and not line.strip().startswith("import"):
-                        rule_start = i
-                        break
-                formatted_code = '\n'.join(lines[rule_start:]).strip()
-            else:
-                stderr = fmt_result.stderr.decode() if fmt_result.stderr else ""
-                errors.append(f"opa fmt failed: {stderr}")
-        except Exception as e:
-            errors.append(f"opa fmt error: {e}")
-        
-        # 3. regal (linting) - only check for errors, not warnings
+        # 2. regal (linting) - only check for errors, not warnings
         try:
             result = subprocess.run(
                 ["regal", "lint", "--format", "json", "--fail-level", "error", str(tmp_path)],
@@ -452,7 +427,7 @@ def validate_rego_code(code: str, package: str = "", imports: List[str] = None, 
             # Other errors are non-fatal
             pass
         
-        # 4. opa test (if test file exists)
+        # 3. opa test (if test file exists)
         if test_file and test_file.exists():
             try:
                 result = subprocess.run(

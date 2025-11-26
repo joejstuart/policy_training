@@ -17,7 +17,6 @@ import argparse
 from pathlib import Path
 from typing import List, Optional, Tuple
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from peft import PeftModel
 
 # Import dynamic context building components
 try:
@@ -61,17 +60,75 @@ QWEN_SYSTEM_PROMPT = (
 
 
 def load_policy_model(base_model: str, model_dir: str = None, device: str = "mps", no_lora: bool = False):
-    """Load the policy model (base model with optional LoRA adapters).
+    """Load the policy model (base model, full fine-tuned model, or base with LoRA adapters).
     
     Args:
         base_model: Base model name (e.g., "Qwen/Qwen2.5-1.5B-Instruct")
-        model_dir: Optional path to LoRA adapter directory
+        model_dir: Optional path to model directory (full fine-tuned model or LoRA adapter)
         device: Device to load on (default: mps for Apple Silicon)
         no_lora: If True, skip loading LoRA adapters even if model_dir is provided
         
     Returns:
         (tokenizer, model, device) tuple
     """
+    # Detect device
+    if device == "mps" and not torch.backends.mps.is_available():
+        print("⚠ MPS not available, falling back to CPU")
+        device = "cpu"
+    elif device == "cuda" and not torch.cuda.is_available():
+        print("⚠ CUDA not available, falling back to CPU")
+        device = "cpu"
+    
+    dtype = torch.bfloat16 if device != "cpu" else torch.float32
+    device_map_value = device if device != "cpu" else None
+    
+    # Check if model_dir contains a full fine-tuned model or LoRA adapter
+    is_full_model = False
+    is_lora_adapter = False
+    
+    if model_dir and not no_lora:
+        model_path = Path(model_dir)
+        if model_path.exists():
+            has_config = (model_path / "config.json").exists()
+            has_adapter_config = (model_path / "adapter_config.json").exists()
+            
+            if has_config and not has_adapter_config:
+                # This looks like a full fine-tuned model
+                is_full_model = True
+            elif has_adapter_config:
+                # This is a LoRA adapter
+                is_lora_adapter = True
+    
+    # Load full fine-tuned model directly
+    if is_full_model:
+        print(f"Loading full fine-tuned model from: {model_dir}...")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_dir,
+                trust_remote_code=True,
+            )
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            
+            model = AutoModelForCausalLM.from_pretrained(
+                model_dir,
+                torch_dtype=dtype,
+                device_map={"": device_map_value} if device_map_value else None,
+                trust_remote_code=True,
+            )
+            
+            if device == "cpu" or device_map_value is None:
+                model = model.to(device)
+            
+            model.eval()
+            print(f"✓ Full fine-tuned model loaded successfully on {device}")
+            print()
+            return tokenizer, model, device
+        except Exception as e:
+            print(f"❌ Error loading full model: {e}")
+            raise
+    
+    # Otherwise, load base model first
     print(f"Loading base model: {base_model}...")
     try:
         tokenizer = AutoTokenizer.from_pretrained(
@@ -90,17 +147,6 @@ def load_policy_model(base_model: str, model_dir: str = None, device: str = "mps
     
     print(f"Loading base model weights...")
     try:
-        # Detect device
-        if device == "mps" and not torch.backends.mps.is_available():
-            print("⚠ MPS not available, falling back to CPU")
-            device = "cpu"
-        elif device == "cuda" and not torch.cuda.is_available():
-            print("⚠ CUDA not available, falling back to CPU")
-            device = "cpu"
-        
-        dtype = torch.bfloat16 if device != "cpu" else torch.float32
-        device_map_value = device if device != "cpu" else None
-        
         base = AutoModelForCausalLM.from_pretrained(
             base_model,
             torch_dtype=dtype,
@@ -118,15 +164,20 @@ def load_policy_model(base_model: str, model_dir: str = None, device: str = "mps
     if no_lora:
         print("Skipping LoRA adapters (--no-lora flag set)")
         model = base
-    elif model_dir:
+    elif is_lora_adapter:
         print(f"Loading LoRA adapters from: {model_dir}...")
         try:
+            # Import PEFT only when needed
+            try:
+                from peft import PeftModel
+            except ImportError:
+                print("❌ Error: PEFT library is required to load LoRA adapters")
+                print("   Install it with: pip install peft")
+                print("   Or use --no-lora to run without LoRA adapters")
+                raise
+            
             adapter_path = Path(model_dir)
-            if not adapter_path.exists():
-                print(f"⚠ Model directory not found: {model_dir}")
-                print("Using base model only (no fine-tuning)")
-                model = base
-            elif (adapter_path / "adapter_config.json").exists():
+            if (adapter_path / "adapter_config.json").exists():
                 # Check adapter config to see what base model it was trained on
                 import json
                 adapter_config_path = adapter_path / "adapter_config.json"
@@ -183,7 +234,12 @@ def load_policy_model(base_model: str, model_dir: str = None, device: str = "mps
             print("Using base model only")
             model = base
     else:
-        print("No LoRA adapter directory specified, using base model only")
+        if model_dir:
+            print(f"⚠ Model directory provided ({model_dir}) but doesn't appear to be a full model or LoRA adapter")
+            print("   Expected: config.json (full model) or adapter_config.json (LoRA adapter)")
+            print("   Using base model only")
+        else:
+            print("No model directory specified, using base model only")
         model = base
     
     model.eval()
@@ -554,27 +610,27 @@ def main():
         description="Run inference with policy rule model",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples (using fine-tuned LoRA model - recommended):
-  # Interactive chat mode with fine-tuned model (best results)
+Examples (using fine-tuned model):
+  # Full fine-tuned model (trained without PEFT/LoRA)
   uv run --project qwen2.5_model python qwen2.5_model/infer_policy.py \\
-      --model-dir qwen2.5-rego-policy-lora \\
-      --package tasks
+      --model-dir /path/to/full-fine-tuned-model \\
+      --package tasks \\
+      --instruction "Write a rule that checks if all tasks succeeded"
 
-  # Single inference with explicit package
+  # LoRA adapter model (trained with PEFT)
   uv run --project qwen2.5_model python qwen2.5_model/infer_policy.py \\
       --model-dir qwen2.5-rego-policy-lora \\
       --package tasks \\
       --instruction "Write a rule that checks if all tasks in a PipelineRun succeeded"
 
+  # Interactive chat mode with fine-tuned model (best results)
+  uv run --project qwen2.5_model python qwen2.5_model/infer_policy.py \\
+      --model-dir qwen2.5-rego-policy-lora \\
+      --package tasks
+
   # Interactive mode: specify package in prompt (tasks: write a rule...)
   uv run --project qwen2.5_model python qwen2.5_model/infer_policy.py \\
       --model-dir qwen2.5-rego-policy-lora
-
-  # Different package (SBOM rules)
-  uv run --project qwen2.5_model python qwen2.5_model/infer_policy.py \\
-      --model-dir qwen2.5-rego-policy-lora \\
-      --package sbom_spdx \\
-      --instruction "Write a rule that validates SPDX SBOM format"
 
 Examples (using base model only - for comparison):
   # Use base model without LoRA adapters
@@ -602,7 +658,7 @@ Examples (using base model only - for comparison):
         "--model-dir",
         type=str,
         default=None,
-        help=f"Path to LoRA adapter directory (optional, default: {DEFAULT_MODEL_DIR} if exists, otherwise base model only)",
+        help=f"Path to model directory (full fine-tuned model or LoRA adapter, optional, default: {DEFAULT_MODEL_DIR} if exists, otherwise base model only)",
     )
     parser.add_argument(
         "--no-lora",

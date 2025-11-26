@@ -116,38 +116,6 @@ def validate_rego_syntax(code: str, package: str = "", imports: List[str] = None
         except Exception as e:
             return False, code, f"opa parse error: {e}"
         
-        # 2. opa fmt (formatting)
-        # Note: Could use OPA's Go library: github.com/open-policy-agent/opa/format
-        try:
-            fmt_result = subprocess.run(
-                opa_base + ["fmt", str(tmp_path)],
-                capture_output=True,
-                timeout=3,  # Reduced timeout
-                text=True
-            )
-            if fmt_result.returncode == 0:
-                formatted_complete = tmp_path.read_text()
-                # Extract just the rule code (skip package/imports if we added them)
-                if package and f"package {package}" in formatted_complete:
-                    lines = formatted_complete.split('\n')
-                    # Find where actual rule code starts
-                    rule_start = 0
-                    for i, line in enumerate(lines):
-                        stripped = line.strip()
-                        if stripped and not stripped.startswith("package") and not stripped.startswith("import"):
-                            rule_start = i
-                            break
-                    formatted_code = '\n'.join(lines[rule_start:]).strip()
-                else:
-                    formatted_code = formatted_complete.strip()
-            else:
-                # Formatting failed, but syntax might be OK
-                if not error_msg:
-                    error_msg = fmt_result.stderr.strip() if fmt_result.stderr else "Formatting error"
-        except Exception as e:
-            # Formatting error is non-fatal if syntax is OK
-            pass
-        
         return True, formatted_code, ""
     
     finally:
