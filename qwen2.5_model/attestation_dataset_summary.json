@@ -1,0 +1,7 @@
+{
+  "total_examples": 1080,
+  "train_examples": 972,
+  "eval_examples": 108,
+  "task_type": "rego_attestation_parse",
+  "source_files": 56
+}
