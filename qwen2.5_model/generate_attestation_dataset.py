@@ -304,49 +304,111 @@ class AttestationTrimmer:
 class RegoCodeGenerator:
     """Generates Rego code for attestation parsing."""
     
+    # Track which format to use (bare expression vs full rule)
+    USE_FULL_RULES = True  # Set to True to include package/import/deny structure
+    USE_DENY_RULES = True  # Set to True to use "deny" rules (common in policy)
+    
+    @staticmethod
+    def _wrap_in_rule(code: str, rule_name: str = "deny", use_full: bool = True, use_deny: bool = True) -> str:
+        """Wrap Rego code in a proper rule structure."""
+        if not use_full:
+            return code
+        
+        # Check if it's already a full rule (has package)
+        if code.strip().startswith("package"):
+            return code
+        
+        # For deny rules, use "deny contains result" pattern (common in policy)
+        if use_deny and rule_name != "deny":
+            # Use the specific rule name but also show deny pattern
+            # Randomly choose between specific rule name and deny pattern
+            import random
+            if random.random() < 0.3:  # 30% chance to use deny
+                rule_name = "deny"
+                result_code = 'result := {"msg": "Policy violation found"}'
+            else:
+                result_code = None
+        else:
+            result_code = None
+        
+        # Check if it's a variable assignment (set comprehension or list)
+        if ":=" in code and ("{" in code or "[" in code):
+            # Variable assignment - keep as is, just add package/import
+            return f"""package attestation_check
+
+import rego.v1
+
+{code}"""
+        elif "if {" in code:
+            # Already has rule structure, just add package/import
+            return f"""package attestation_check
+
+import rego.v1
+
+{code}"""
+        else:
+            # Simple expressions - wrap in a rule
+            if result_code:
+                return f"""package attestation_check
+
+import rego.v1
+
+{rule_name} contains result if {{
+    {code}
+    {result_code}
+}}"""
+            else:
+                return f"""package attestation_check
+
+import rego.v1
+
+{rule_name} if {{
+    {code}
+}}"""
+    
     @staticmethod
     def generate_task_name_check(task_name: str) -> str:
         """Generate Rego code to check for a task by name."""
-        return f"""task_found if {{
-    some att in input.attestations
+        code = f"""some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
-    task.name == "{task_name}"
-}}"""
+    task.name == "{task_name}\""""
+        return RegoCodeGenerator._wrap_in_rule(code, "task_found", RegoCodeGenerator.USE_FULL_RULES, RegoCodeGenerator.USE_DENY_RULES)
     
     @staticmethod
     def generate_task_status_check(task_name: str, status: str) -> str:
         """Generate Rego code to check task status."""
-        return f"""task_status_check if {{
-    some att in input.attestations
+        code = f"""some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.name == "{task_name}"
-    task.status == "{status}"
-}}"""
+    task.status == "{status}\""""
+        return RegoCodeGenerator._wrap_in_rule(code, "task_status_check", RegoCodeGenerator.USE_FULL_RULES, RegoCodeGenerator.USE_DENY_RULES)
     
     @staticmethod
     def generate_list_task_names() -> str:
         """Generate Rego code to list all task names."""
-        return """task_names := {name |
+        code = """task_names := {name |
     some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     name := task.name
 }"""
+        return RegoCodeGenerator._wrap_in_rule(code, "task_names", RegoCodeGenerator.USE_FULL_RULES)
     
     @staticmethod
     def generate_get_task_results(task_name: str) -> str:
         """Generate Rego code to get results from a task."""
-        return f"""task_results := [result |
+        code = f"""task_results := [result |
     some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.name == "{task_name}"
     some result in task.results
 ]"""
+        return RegoCodeGenerator._wrap_in_rule(code, "task_results", RegoCodeGenerator.USE_FULL_RULES)
     
     @staticmethod
     def generate_get_task_bundle(task_name: str) -> str:
         """Generate Rego code to get bundle reference for a task."""
         # Handle both ref.bundle (direct) and ref.params[].bundle (via params)
-        return f"""bundle_ref := ref if {{
+        code = f"""bundle_ref := ref if {{
     some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.name == "{task_name}"
@@ -359,49 +421,48 @@ class RegoCodeGenerator:
     param.name == "bundle"
     ref := param.value
 }}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "bundle_ref", RegoCodeGenerator.USE_FULL_RULES)
     
     @staticmethod
     def generate_get_subject_digest(index: int = 0) -> str:
         """Generate Rego code to get subject digest."""
-        return f"""subject_digest := digest if {{
-    some att in input.attestations
-    att.statement.subject[{index}].digest.sha256 == digest
-}}"""
+        code = f"""some att in input.attestations
+    att.statement.subject[{index}].digest.sha256 == digest"""
+        return RegoCodeGenerator._wrap_in_rule(code, "subject_digest", RegoCodeGenerator.USE_FULL_RULES)
     
     @staticmethod
     def generate_check_material(uri: str, commit: Optional[str] = None) -> str:
         """Generate Rego code to check for a material."""
         if commit:
-            return f"""material_found if {{
-    some att in input.attestations
+            code = f"""some att in input.attestations
     some material in att.statement.predicate.materials
     material.uri == "{uri}"
-    material.digest.sha1 == "{commit}"
-}}"""
+    material.digest.sha1 == "{commit}\""""
         else:
-            return f"""material_found if {{
-    some att in input.attestations
+            code = f"""some att in input.attestations
     some material in att.statement.predicate.materials
-    material.uri == "{uri}"
-}}"""
+    material.uri == "{uri}\""""
+        return RegoCodeGenerator._wrap_in_rule(code, "material_found", RegoCodeGenerator.USE_FULL_RULES)
     
     @staticmethod
     def generate_list_subject_names() -> str:
         """Generate Rego code to list all subject names."""
-        return """subject_names := {name |
+        code = """subject_names := {name |
     some att in input.attestations
     some subject in att.statement.subject
     name := subject.name
 }"""
+        return RegoCodeGenerator._wrap_in_rule(code, "subject_names", RegoCodeGenerator.USE_FULL_RULES)
     
     @staticmethod
     def generate_find_tasks_by_status(status: str) -> str:
         """Generate Rego code to find tasks by status."""
-        return f"""tasks_with_status := [task |
+        code = f"""tasks_with_status := [task |
     some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.status == "{status}"
 ]"""
+        return RegoCodeGenerator._wrap_in_rule(code, "tasks_with_status", RegoCodeGenerator.USE_FULL_RULES)
 
 
 class InstructionGenerator:
@@ -634,8 +695,26 @@ class ExampleBuilder:
         return trimmed
 
 
+def check_opa_available() -> bool:
+    """Check if opa binary is available."""
+    try:
+        result = subprocess.run(
+            ["opa", "version"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
 def validate_rego_syntax(rego_code: str) -> bool:
-    """Validate Rego code syntax using opa parse."""
+    """Validate Rego code syntax using opa parse. Returns True if opa is not available."""
+    # Check if opa is available first
+    if not check_opa_available():
+        return True  # Skip validation if opa not found
+    
     try:
         # Wrap in a package if not already wrapped
         if not rego_code.strip().startswith("package"):
@@ -688,6 +767,12 @@ def main():
     """Main function to generate dataset."""
     print("Generating attestation parsing training dataset...")
     print(f"Repo root: {REPO_ROOT}")
+    
+    # Check if opa is available
+    if not check_opa_available():
+        print("⚠ OPA binary not found - skipping Rego syntax validation")
+    else:
+        print("✓ OPA found - validating Rego syntax")
     
     # Find all JSON files in repo root
     json_files = []
