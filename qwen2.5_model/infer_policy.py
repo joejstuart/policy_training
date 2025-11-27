@@ -781,8 +781,8 @@ Examples (using base model only - for comparison):
     if not args.no_context:
         print("Initializing library context system...")
         try:
-            mapper = LibraryMapper(repo_root)
-            mapper.build_mappings()
+            # mapper = LibraryMapper(repo_root)
+            # mapper.build_mappings()
             
             # indexer = LibraryIndexer(repo_root, mapper)
             # # Scan for usage examples (slower but provides better context)
