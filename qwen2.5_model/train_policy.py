@@ -28,7 +28,14 @@ from transformers import (
     TrainerCallback,
 )
 from torch.utils.data import DataLoader
-from peft import LoraConfig, get_peft_model, TaskType
+
+# PEFT is optional - support full fine-tuning if not available
+try:
+    from peft import LoraConfig, get_peft_model, TaskType
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
+    print("⚠ PEFT not available - will use full fine-tuning instead of LoRA")
 
 
 @dataclass
@@ -52,11 +59,18 @@ class TrainingConfig:
     save_steps: int = 100
 
 
-QWEN_SYSTEM_PROMPT = (
+QWEN_SYSTEM_PROMPT_POLICY = (
     "You are an expert Rego/OPA policy assistant. "
     "You follow instructions carefully and emit valid Rego code using "
     "Conforma's preferred patterns (deny contains result, METADATA, result_helper, etc). "
     "Only use helpers that are provided in the context - never invent new helper functions."
+)
+
+QWEN_SYSTEM_PROMPT_ATTESTATION = (
+    "You are an expert Rego policy rule writer. Rego is a declarative policy language for evaluating structured data like JSON. "
+    "Given an instruction about what to find or check in an attestation, write Rego code that evaluates the attestation JSON structure and makes the requested policy decision. "
+    "Use proper Rego syntax: declarative expressions, array iteration with 'some', field access, and condition checking. "
+    "Express \"what should be true\" rather than \"how to check it\"."
 )
 
 
@@ -65,13 +79,20 @@ def build_messages_from_example(example):
     
     Format:
     - instruction: Task description
-    - context: Package + imports + helpers
+    - context: Package + imports + helpers (for policy rules) or JSON attestation (for attestation parsing)
     - input_code: (optional) Code to refactor
     - output_code: Expected output code
-    - task_type: "implement" or "refactor"
+    - task_type: "implement", "refactor", or "rego_attestation_parse"
     """
+    # Select system prompt based on task type
+    task_type = example.get("task_type", "implement")
+    if task_type == "rego_attestation_parse":
+        system_prompt = QWEN_SYSTEM_PROMPT_ATTESTATION
+    else:
+        system_prompt = QWEN_SYSTEM_PROMPT_POLICY
+    
     messages = [
-        {"role": "system", "content": QWEN_SYSTEM_PROMPT}
+        {"role": "system", "content": system_prompt}
     ]
     
     # Build user message
@@ -278,8 +299,17 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
     return tokenizer, model
 
 
-def apply_lora(model, cfg):
-    """Apply LoRA to the model, targeting attention + MLP layers."""
+def apply_lora(model, cfg, use_lora=True):
+    """Apply LoRA to the model, or return model as-is for full fine-tuning."""
+    if not use_lora or not PEFT_AVAILABLE:
+        print("Using full fine-tuning (all parameters trainable)")
+        # Count trainable parameters
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"  Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
+        print(f"  Total parameters: {total_params:,}")
+        return model
+    
     print("Applying LoRA...")
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -431,6 +461,13 @@ Examples:
       --eval-path qwen2.5_model/eval.jsonl \\
       --output-dir qwen2.5-rego-policy-lora
 
+  # Full fine-tuning (without LoRA/PEFT)
+  uv run python qwen2.5_model/train_policy.py \\
+      --train-path qwen2.5_model/attestation_train.jsonl \\
+      --eval-path qwen2.5_model/attestation_eval.jsonl \\
+      --output-dir qwen2.5-attestation-parse \\
+      --no-lora
+
   # For faster training (if you have enough memory)
   uv run python qwen2.5_model/train_policy.py \\
       --train-path qwen2.5_model/train.jsonl \\
@@ -536,6 +573,11 @@ Examples:
         choices=["no", "steps", "epoch"],
         help="Evaluation strategy (default: 'steps')",
     )
+    parser.add_argument(
+        "--no-lora",
+        action="store_true",
+        help="Disable LoRA and use full fine-tuning (required if PEFT not available)",
+    )
     
     args = parser.parse_args()
     
@@ -605,7 +647,15 @@ Examples:
     # Load model and tokenizer
     enable_model_gc = not args.disable_gradient_checkpointing
     tokenizer, base_model = load_qwen_model(cfg, enable_gradient_checkpointing=enable_model_gc)
-    model = apply_lora(base_model, cfg)
+    
+    # Determine if we should use LoRA
+    use_lora = not args.no_lora and PEFT_AVAILABLE
+    if args.no_lora:
+        print("--no-lora flag set: using full fine-tuning")
+    elif not PEFT_AVAILABLE:
+        print("PEFT not available: using full fine-tuning")
+    
+    model = apply_lora(base_model, cfg, use_lora=use_lora)
     
     # Create datasets (pre-tokenization happens here)
     print("Creating datasets...")
