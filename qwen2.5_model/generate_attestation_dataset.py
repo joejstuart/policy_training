@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Set
 from dataclasses import dataclass
@@ -765,8 +766,45 @@ def example_to_jsonl(example: AttestationExample) -> str:
 
 def main():
     """Main function to generate dataset."""
+    parser = argparse.ArgumentParser(
+        description="Generate training dataset for Rego attestation parsing",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Use default repo root (one level up from script)
+  python generate_attestation_dataset.py
+
+  # Specify custom directory for JSON files
+  python generate_attestation_dataset.py --json-dir /path/to/json/files
+
+  # Specify output directory
+  python generate_attestation_dataset.py --output-dir ./output
+        """
+    )
+    parser.add_argument(
+        "--json-dir",
+        type=str,
+        default=None,
+        help="Directory containing JSON attestation files (default: repo root, one level up from script)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for JSONL files (default: same as script directory)",
+    )
+    
+    args = parser.parse_args()
+    
     print("Generating attestation parsing training dataset...")
-    print(f"Repo root: {REPO_ROOT}")
+    
+    # Determine JSON files directory
+    if args.json_dir:
+        json_dir = Path(args.json_dir).resolve()
+    else:
+        json_dir = REPO_ROOT
+    
+    print(f"Looking for JSON files in: {json_dir}")
     
     # Check if opa is available
     if not check_opa_available():
@@ -774,16 +812,21 @@ def main():
     else:
         print("✓ OPA found - validating Rego syntax")
     
-    # Find all JSON files in repo root
+    # Find all JSON files
     json_files = []
-    for json_file in REPO_ROOT.glob("*.json"):
-        if json_file.name.startswith("att") or "sha256" in json_file.name:
-            json_files.append(json_file)
+    if json_dir.exists() and json_dir.is_dir():
+        for json_file in json_dir.glob("*.json"):
+            if json_file.name.startswith("att") or "sha256" in json_file.name:
+                json_files.append(json_file)
+    else:
+        print(f"Error: Directory not found: {json_dir}")
+        return
     
     print(f"Found {len(json_files)} JSON attestation files")
     
     if not json_files:
-        print("No JSON files found in repo root!")
+        print(f"No JSON files found in {json_dir}!")
+        print("  Looking for files starting with 'att' or containing 'sha256'")
         return
     
     # Generate examples
@@ -850,8 +893,13 @@ def main():
     
     print(f"Train: {len(train_examples)}, Eval: {len(eval_examples)}")
     
-    # Write output files
-    output_dir = Path(__file__).parent
+    # Determine output directory
+    if args.output_dir:
+        output_dir = Path(args.output_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir = Path(__file__).parent
+    
     train_path = output_dir / "attestation_train.jsonl"
     eval_path = output_dir / "attestation_eval.jsonl"
     
