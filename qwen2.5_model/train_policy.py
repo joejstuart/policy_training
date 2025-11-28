@@ -24,6 +24,7 @@ if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
 import argparse
 import json
 import sys
+import logging
 import torch
 
 # Initialize CUDA properly before any operations
@@ -36,8 +37,8 @@ try:
         _ = torch.cuda.current_device()
         torch.cuda.empty_cache()
 except Exception as e:
-    print(f"⚠ Warning: CUDA initialization issue: {e}")
-    print("  Continuing anyway - may fall back to CPU if needed")
+    # Will log after logger is set up
+    pass  # Logged later
 from dataclasses import dataclass
 from pathlib import Path
 from torch.utils.data import Dataset
@@ -50,13 +51,25 @@ from transformers import (
 )
 from torch.utils.data import DataLoader
 
+# Import logging setup
+try:
+    from logging_setup import setup_logging, log_exception
+except ImportError:
+    # Fallback if logging_setup not available
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    def setup_logging(name, **kwargs):
+        return logging.getLogger(name)
+    def log_exception(logger, exc, context=""):
+        logger.error(f"{context}: {exc}" if context else f"Exception: {exc}", exc_info=True)
+
 # PEFT is optional - support full fine-tuning if not available
 try:
     from peft import LoraConfig, get_peft_model, TaskType
     PEFT_AVAILABLE = True
 except ImportError:
     PEFT_AVAILABLE = False
-    print("⚠ PEFT not available - will use full fine-tuning instead of LoRA")
+    # Will log this after logger is set up
 
 
 @dataclass
@@ -198,10 +211,10 @@ class PolicyDataset(Dataset):
                     self.samples.append(json.loads(line))
         
         # Pre-tokenize everything once
-        print(f"Pre-tokenizing {len(self.samples)} examples...")
+        logging.info(f"Pre-tokenizing {len(self.samples)} examples...")
         for i, example in enumerate(self.samples):
             if (i + 1) % 50 == 0:
-                print(f"  Tokenized {i + 1}/{len(self.samples)} examples...")
+                logging.info(f"  Tokenized {i + 1}/{len(self.samples)} examples...")
             
             # Build messages
             messages = build_messages_from_example(example)
@@ -236,7 +249,7 @@ class PolicyDataset(Dataset):
             self.input_ids.append(full_ids)
             self.labels.append(labels)
         
-        print(f"✓ Pre-tokenization complete")
+        logging.info("Pre-tokenization complete")
 
     def __len__(self):
         return len(self.samples)
@@ -262,29 +275,30 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
             device = torch.device("cuda")
             device_name = f"CUDA (GPU: {torch.cuda.get_device_name(0)})"
         except Exception as e:
-            print(f"⚠ CUDA initialization failed: {e}")
-            print("  Falling back to CPU")
+            logging.warning(f"CUDA initialization failed: {e}")
+            logging.warning("  Falling back to CPU")
             device = torch.device("cpu")
             device_name = "CPU"
     else:
         device = torch.device("cpu")
         device_name = "CPU"
     
-    print(f"Using device: {device_name}")
+    logging.info(f"Using device: {device_name}")
     dtype = torch.bfloat16  # Qwen prefers bf16/fp16
 
-    print(f"Loading tokenizer from {cfg.model_name}...")
+    logging.info(f"Loading tokenizer from {cfg.model_name}...")
     try:
         tokenizer = AutoTokenizer.from_pretrained(
             cfg.model_name,
             trust_remote_code=True,
         )
     except Exception as e:
-        print(f"\n❌ Error loading tokenizer: {e}")
-        print("\nPossible solutions:")
-        print("1. Check if the model name is correct on HuggingFace")
-        print("2. If it's a gated model, authenticate with: huggingface-cli login")
-        print("3. Try: Qwen/Qwen2.5-1.5B-Instruct")
+        logging.error(f"Error loading tokenizer: {e}")
+        logging.error("Possible solutions:")
+        logging.error("1. Check if the model name is correct on HuggingFace")
+        logging.error("2. If it's a gated model, authenticate with: huggingface-cli login")
+        logging.error("3. Try: Qwen/Qwen2.5-1.5B-Instruct")
+        log_exception(logging.getLogger(__name__), e, "Failed to load tokenizer")
         raise
     
     # Ensure tokenizer has pad token
@@ -294,7 +308,7 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
     tokenizer.padding_side = "right"
     tokenizer.truncation_side = "right"
 
-    print(f"Loading model from {cfg.model_name}...")
+    logging.info(f"Loading model from {cfg.model_name}...")
     try:
         device_map_value = str(device) if device.type != "cpu" else "cpu"
         model = AutoModelForCausalLM.from_pretrained(
@@ -304,11 +318,12 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
             trust_remote_code=True,
         )
     except Exception as e:
-        print(f"\n❌ Error loading model: {e}")
-        print("\nPossible solutions:")
-        print("1. Check if the model name is correct on HuggingFace")
-        print("2. If it's a gated model, authenticate with: huggingface-cli login")
-        print("3. Try a smaller model if you're running out of memory")
+        logging.error(f"Error loading model: {e}")
+        logging.error("\nPossible solutions:")
+        logging.error("1. Check if the model name is correct on HuggingFace")
+        logging.error("2. If it's a gated model, authenticate with: huggingface-cli login")
+        logging.error("3. Try a smaller model if you're running out of memory")
+        log_exception(logging.getLogger(__name__), e, "Failed to load model")
         raise
 
     # Always disable cache for training
@@ -323,23 +338,25 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
         model.to(device)
     model.train()
     
-    print(f"✓ Loaded model with {sum(p.numel() for p in model.parameters())/1e9:.2f}B parameters")
-    print(f"✓ Model on device: {next(model.parameters()).device}")
+    param_count = sum(p.numel() for p in model.parameters()) / 1e9
+    model_device = next(model.parameters()).device
+    logging.info(f"Loaded model with {param_count:.2f}B parameters")
+    logging.info(f"Model on device: {model_device}")
     return tokenizer, model
 
 
 def apply_lora(model, cfg, use_lora=True):
     """Apply LoRA to the model, or return model as-is for full fine-tuning."""
     if not use_lora or not PEFT_AVAILABLE:
-        print("Using full fine-tuning (all parameters trainable)")
+        logging.info("Using full fine-tuning (all parameters trainable)")
         # Count trainable parameters
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total_params = sum(p.numel() for p in model.parameters())
-        print(f"  Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
-        print(f"  Total parameters: {total_params:,}")
+        logging.info(f"  Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
+        logging.info(f"  Total parameters: {total_params:,}")
         return model
     
-    print("Applying LoRA...")
+    logging.info("Applying LoRA...")
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=cfg.lora_r,
@@ -428,13 +445,13 @@ def train_with_trainer(model, tokenizer, train_dataset, eval_dataset, cfg,
     
     # For MPS, warm up with a small batch first to avoid hangs
     if torch.backends.mps.is_available() and eval_strategy != "no":
-        print("MPS detected with evaluation enabled - warming up model...")
+        logging.info("MPS detected with evaluation enabled - warming up model...")
         # Create a dummy batch to warm up MPS
         dummy_batch = data_collator([train_dataset[0], train_dataset[1]])
         with torch.no_grad():
             dummy_output = model(**{k: v.to(model.device) for k, v in dummy_batch.items() if k != "labels"})
         torch.mps.synchronize()
-        print("✓ Model warmed up")
+        logging.info("Model warmed up")
     
     trainer = Trainer(
         model=model,
@@ -444,12 +461,12 @@ def train_with_trainer(model, tokenizer, train_dataset, eval_dataset, cfg,
         data_collator=data_collator,
     )
     
-    print("Starting training...")
-    print("⚠ Monitor eval loss closely - stop early if it starts increasing (sign of overfitting)")
+    logging.info("Starting training...")
+    logging.warning("Monitor eval loss closely - stop early if it starts increasing (sign of overfitting)")
     
     # For MPS, add explicit synchronization before training starts
     if torch.backends.mps.is_available():
-        print("MPS detected - adding synchronization point...")
+        logging.debug("MPS detected - adding synchronization point...")
         torch.mps.synchronize()
     
     # Add progress callback to debug hangs
@@ -460,7 +477,7 @@ def train_with_trainer(model, tokenizer, train_dataset, eval_dataset, cfg,
         def on_step_end(self, args, state, control, **kwargs):
             self.step_count += 1
             if self.step_count % 10 == 0:
-                print(f"  Progress: {self.step_count} steps completed")
+                logging.info(f"  Progress: {self.step_count} steps completed")
             return control
     
     trainer.add_callback(ProgressCallback())
@@ -472,10 +489,10 @@ def train_with_trainer(model, tokenizer, train_dataset, eval_dataset, cfg,
 def save_lora_model(model, tokenizer, output_dir):
     """Save LoRA adapters and tokenizer."""
     os.makedirs(output_dir, exist_ok=True)
-    print(f"Saving LoRA adapters to {output_dir}...")
+    logging.info(f"Saving LoRA adapters to {output_dir}...")
     model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
-    print(f"✓ Saved LoRA adapters and tokenizer to {output_dir}")
+    logging.info(f"Saved LoRA adapters and tokenizer to {output_dir}")
 
 
 def main():
@@ -669,10 +686,16 @@ Examples:
     if not os.path.exists(cfg.eval_path):
         raise FileNotFoundError(f"Evaluation file not found: {cfg.eval_path}")
     
-    print("=" * 60)
-    print("Policy Rule Model Training")
-    print("=" * 60)
-    print()
+    # Setup logging
+    logger = setup_logging("train_policy")
+    
+    logger.info("=" * 60)
+    logger.info("Policy Rule Model Training")
+    logger.info("=" * 60)
+    
+    # Log PEFT availability
+    if not PEFT_AVAILABLE:
+        logger.warning("PEFT not available - will use full fine-tuning instead of LoRA")
     
     # Load model and tokenizer
     enable_model_gc = not args.disable_gradient_checkpointing
@@ -681,20 +704,19 @@ Examples:
     # Determine if we should use LoRA
     use_lora = not args.no_lora and PEFT_AVAILABLE
     if args.no_lora:
-        print("--no-lora flag set: using full fine-tuning")
+        logger.info("--no-lora flag set: using full fine-tuning")
     elif not PEFT_AVAILABLE:
-        print("PEFT not available: using full fine-tuning")
+        logger.info("PEFT not available: using full fine-tuning")
     
     model = apply_lora(base_model, cfg, use_lora=use_lora)
     
     # Create datasets (pre-tokenization happens here)
-    print("Creating datasets...")
-    print("  Note: Pre-tokenizing examples for faster training")
+    logger.info("Creating datasets...")
+    logger.info("  Note: Pre-tokenizing examples for faster training")
     train_ds = PolicyDataset(cfg.train_path, tokenizer, cfg.max_seq_len)
     eval_ds = PolicyDataset(cfg.eval_path, tokenizer, cfg.max_seq_len)
-    print(f"  Training examples: {len(train_ds)}")
-    print(f"  Evaluation examples: {len(eval_ds)}")
-    print()
+    logger.info(f"  Training examples: {len(train_ds)}")
+    logger.info(f"  Evaluation examples: {len(eval_ds)}")
     
     # Train
     trainer = train_with_trainer(
@@ -706,14 +728,12 @@ Examples:
     
     # Save
     save_lora_model(model, tokenizer, cfg.output_dir)
-    print()
-    print("=" * 60)
-    print("✓ Training complete!")
-    print("=" * 60)
-    print(f"LoRA adapters saved to: {cfg.output_dir}")
-    print()
-    print("To use the model at inference time:")
-    print(f"  Load the model from: {cfg.output_dir}")
+    logger.info("=" * 60)
+    logger.info("Training complete!")
+    logger.info("=" * 60)
+    logger.info(f"LoRA adapters saved to: {cfg.output_dir}")
+    logger.info("To use the model at inference time:")
+    logger.info(f"  Load the model from: {cfg.output_dir}")
 
 
 if __name__ == "__main__":

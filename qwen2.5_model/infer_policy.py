@@ -62,6 +62,10 @@ QWEN_SYSTEM_PROMPT = (
 QWEN_SYSTEM_PROMPT_ATTESTATION = (
     "You are an expert Rego/OPA policy assistant for attestation parsing. "
     "You write Rego code that correctly parses attestation JSON structures.\n\n"
+    "CRITICAL: Follow the user's instructions precisely. "
+    "If the instruction specifies a rule name, function name, variable name, return value, "
+    "or any other specific requirement, you MUST use exactly what is requested. "
+    "Do not substitute defaults (like 'deny') unless the instruction explicitly asks for them.\n\n"
     "Follow Rego style guide best practices:\n"
     "- Use 'in' for membership checks when checking multiple values\n"
     "- Use 'every' for FOR ALL queries (e.g., 'all tasks succeeded')\n"
@@ -406,6 +410,47 @@ Please provide the corrected Rego code that fixes these errors."""
     return response, False, iterations
 
 
+def enhance_instruction_with_emphasis(instruction: str) -> str:
+    """Enhance instruction to emphasize following specific requirements.
+    
+    Extracts and emphasizes any explicitly specified names, values, or requirements
+    from the instruction to help the model follow them precisely.
+    """
+    # Look for quoted strings that might be specific names/values
+    quoted_pattern = r"['\"]([^'\"]+)['\"]"
+    quoted_matches = re.findall(quoted_pattern, instruction)
+    
+    if not quoted_matches:
+        return instruction
+    
+    # Build emphasis text for quoted values that appear to be specifications
+    emphasis_parts = []
+    instruction_lower = instruction.lower()
+    
+    for match in quoted_matches:
+        # Find the context around this quoted value
+        match_pos = instruction.find(f"'{match}'")
+        if match_pos == -1:
+            match_pos = instruction.find(f'"{match}"')
+        
+        if match_pos > 0:
+            # Look at context before the quoted value
+            context_before = instruction_lower[max(0, match_pos-50):match_pos]
+            
+            # Check if this looks like a specification (named, called, return, etc.)
+            if any(keyword in context_before for keyword in [
+                'named', 'called', 'name', 'rule', 'function', 'variable',
+                'return', 'value', 'status', 'result', 'create', 'write', 'make'
+            ]):
+                emphasis_parts.append(f"Use exactly '{match}' as specified in the instruction")
+    
+    if emphasis_parts:
+        emphasis_text = "\n".join(emphasis_parts)
+        return f"{instruction}\n\nIMPORTANT: {emphasis_text}. Do not substitute with defaults."
+    
+    return instruction
+
+
 def generate_response(tokenizer, model, device, messages, max_tokens=512, temperature=0.7):
     """Generate a response from the model."""
     # Build chat template
@@ -545,12 +590,15 @@ def interactive_chat(tokenizer, model, device, builder=None, default_package=Non
                 except Exception as e:
                     print(f"⚠ Warning: Failed to build context: {e}")
             
+            # Enhance instruction to emphasize specific requirements
+            enhanced_instruction = enhance_instruction_with_emphasis(instruction)
+            
             # Combine context parts
             if context_parts:
                 combined_context = "\n\n".join(context_parts)
-                user_content = f"{combined_context}\n\nInstruction: {instruction}"
+                user_content = f"{combined_context}\n\nInstruction: {enhanced_instruction}"
             else:
-                user_content = instruction
+                user_content = enhanced_instruction
             
             # Add user message
             messages.append({"role": "user", "content": user_content})
@@ -659,13 +707,16 @@ def single_inference(
         # Use provided static context
         context_parts.append(context)
     
+    # Enhance instruction to emphasize specific requirements
+    enhanced_instruction = enhance_instruction_with_emphasis(instruction)
+    
     # Combine context parts
     if context_parts:
         combined_context = "\n\n".join(context_parts)
-        user_content = f"{combined_context}\n\nInstruction: {instruction}"
+        user_content = f"{combined_context}\n\nInstruction: {enhanced_instruction}"
     else:
         # No context available
-        user_content = instruction
+        user_content = enhanced_instruction
     
     messages.append({"role": "user", "content": user_content})
     

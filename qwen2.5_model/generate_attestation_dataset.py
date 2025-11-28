@@ -16,11 +16,24 @@ import subprocess
 import sys
 import tempfile
 import argparse
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Set
 from dataclasses import dataclass
 import random
 import copy
+
+# Import logging setup
+try:
+    from logging_setup import setup_logging, log_exception
+except ImportError:
+    # Fallback if logging_setup not available
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    def setup_logging(name, **kwargs):
+        return logging.getLogger(name)
+    def log_exception(logger, exc, context=""):
+        logger.error(f"{context}: {exc}" if context else f"Exception: {exc}", exc_info=True)
 
 # Configuration
 REPO_ROOT = Path(__file__).parent.parent
@@ -67,8 +80,8 @@ class AttestationAnalyzer:
                     # If that fails, try reading just first 100KB (most files are single objects)
                     try:
                         raw_data = json.loads(content[:100000])
-                    except:
-                        print(f"  Warning: Could not parse JSON from {self.json_file.name}")
+                    except Exception as e:
+                        logging.warning(f"Could not parse JSON from {self.json_file.name}: {e}")
                         return False
             
             # Normalize to standard format: {"attestations": [{"statement": {...}}]}
@@ -107,9 +120,7 @@ class AttestationAnalyzer:
             
             return True
         except Exception as e:
-            print(f"Error loading {self.json_file}: {e}")
-            import traceback
-            traceback.print_exc()
+            logging.error(f"Error loading {self.json_file}: {e}", exc_info=True)
             return False
     
     def get_tasks(self) -> List[Dict]:
@@ -1198,7 +1209,7 @@ class ExampleBuilder:
             if len(lines) > MAX_CONTEXT_LINES * 1.5:  # Allow some flexibility
                 schema_lines = len(schema_header.split('\n'))
                 json_lines = len(json_str.split('\n'))
-                print(f"Warning: Context still large ({len(lines)} lines, {schema_lines} schema + {json_lines} JSON) for {analyzer.json_file.name}")
+                logging.warning(f"Context still large ({len(lines)} lines, {schema_lines} schema + {json_lines} JSON) for {analyzer.json_file.name}")
         
         return AttestationExample(
             instruction=instruction,
@@ -1382,7 +1393,12 @@ Examples:
     
     args = parser.parse_args()
     
-    print("Generating attestation parsing training dataset...")
+    # Setup logging
+    logger = setup_logging("generate_attestation_dataset")
+    
+    logger.info("=" * 70)
+    logger.info("Generating attestation parsing training dataset")
+    logger.info("=" * 70)
     
     # Determine JSON files directory
     if args.json_dir:
@@ -1390,13 +1406,13 @@ Examples:
     else:
         json_dir = REPO_ROOT
     
-    print(f"Looking for JSON files in: {json_dir}")
+    logger.info(f"Looking for JSON files in: {json_dir}")
     
     # Check if opa is available
     if not check_opa_available():
-        print("⚠ OPA binary not found - skipping Rego syntax validation")
+        logger.warning("OPA binary not found - skipping Rego syntax validation")
     else:
-        print("✓ OPA found - validating Rego syntax")
+        logger.info("OPA found - validating Rego syntax")
     
     # Find all JSON files
     json_files = []
@@ -1405,25 +1421,25 @@ Examples:
             if json_file.name.startswith("att") or "sha256" in json_file.name:
                 json_files.append(json_file)
     else:
-        print(f"Error: Directory not found: {json_dir}")
+        logger.error(f"Directory not found: {json_dir}")
         return
     
-    print(f"Found {len(json_files)} JSON attestation files")
+    logger.info(f"Found {len(json_files)} JSON attestation files")
     
     if not json_files:
-        print(f"No JSON files found in {json_dir}!")
-        print("  Looking for files starting with 'att' or containing 'sha256'")
+        logger.error(f"No JSON files found in {json_dir}!")
+        logger.error("  Looking for files starting with 'att' or containing 'sha256'")
         return
     
     # Generate examples
     all_examples = []
     
     for json_file in json_files:
-        print(f"\nProcessing {json_file.name}...")
+        logger.info(f"Processing {json_file.name}...")
         
         analyzer = AttestationAnalyzer(json_file)
         if not analyzer.load():
-            print(f"  Skipped (failed to load)")
+            logger.warning(f"  Skipped {json_file.name} (failed to load)")
             continue
         
         # Generate instructions based on content
@@ -1431,7 +1447,7 @@ Examples:
         subjects = analyzer.get_subjects()
         materials = analyzer.get_materials()
         
-        print(f"  Found: {len(tasks)} tasks, {len(subjects)} subjects, {len(materials)} materials")
+        logger.info(f"  Found: {len(tasks)} tasks, {len(subjects)} subjects, {len(materials)} materials")
         
         # Generate task-related examples (limit to avoid too many per file)
         task_examples = InstructionGenerator.generate_task_instructions(tasks)
@@ -1442,12 +1458,12 @@ Examples:
         for instruction, rego_code, metadata in task_examples:
             # Primary validation: Rego syntax (must pass)
             if not validate_rego_syntax(rego_code):
-                print(f"  Warning: Invalid Rego code for instruction: {instruction[:50]}...")
+                logger.warning(f"Invalid Rego code for instruction: {instruction[:50]}...")
                 continue
             
             # Secondary validation: Attestation parsing correctness (must pass)
             if not _validate_attestation_parsing(rego_code, instruction):
-                print(f"  Warning: Attestation parsing issue for instruction: {instruction[:50]}...")
+                logger.warning(f"Attestation parsing issue for instruction: {instruction[:50]}...")
                 continue
             
             example = ExampleBuilder.build_example(instruction, rego_code, analyzer, metadata)
@@ -1476,9 +1492,9 @@ Examples:
             if example:
                 all_examples.append(example)
         
-        print(f"  Generated {len(all_examples)} total examples so far")
+        logger.info(f"  Generated {len(all_examples)} total examples so far")
     
-    print(f"\nTotal examples generated: {len(all_examples)}")
+    logger.info(f"Total examples generated: {len(all_examples)}")
     
     # Shuffle and split
     random.shuffle(all_examples)
@@ -1486,7 +1502,7 @@ Examples:
     train_examples = all_examples[:split_idx]
     eval_examples = all_examples[split_idx:]
     
-    print(f"Train: {len(train_examples)}, Eval: {len(eval_examples)}")
+    logger.info(f"Train: {len(train_examples)}, Eval: {len(eval_examples)}")
     
     # Determine output directory
     if args.output_dir:
@@ -1506,9 +1522,9 @@ Examples:
         for example in eval_examples:
             f.write(example_to_jsonl(example) + '\n')
     
-    print(f"\n✓ Dataset written:")
-    print(f"  Train: {train_path}")
-    print(f"  Eval: {eval_path}")
+    logger.info("Dataset written successfully")
+    logger.info(f"  Train: {train_path}")
+    logger.info(f"  Eval: {eval_path}")
     
     # Generate summary
     summary = {
@@ -1523,7 +1539,8 @@ Examples:
     with open(summary_path, 'w') as f:
         json.dump(summary, f, indent=2)
     
-    print(f"  Summary: {summary_path}")
+    logger.info(f"  Summary: {summary_path}")
+    logger.info("=" * 70)
 
 
 if __name__ == "__main__":
