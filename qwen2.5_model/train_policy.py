@@ -382,7 +382,8 @@ def train_with_trainer(model, tokenizer, train_dataset, eval_dataset, cfg,
         
         # Memory optimization
         gradient_checkpointing=not disable_gradient_checkpointing,
-        dataloader_pin_memory=False,  # Disable pin_memory for MPS
+        # Pin memory: True for CUDA (faster), False for MPS (required)
+        dataloader_pin_memory=torch.cuda.is_available(),
         dataloader_num_workers=dataloader_num_workers,
         
         # Performance optimizations

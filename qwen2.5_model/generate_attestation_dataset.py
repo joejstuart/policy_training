@@ -1144,6 +1144,28 @@ class ExampleBuilder:
     """Builds training examples from instructions and attestations."""
     
     @staticmethod
+    def _generate_schema_header(instruction: str, metadata: Dict) -> str:
+        """Generate query-specific schema header based on instruction type."""
+        instruction_lower = instruction.lower()
+        
+        if "task" in instruction_lower:
+            # Task queries - show buildConfig.tasks path
+            if "bundle" in instruction_lower:
+                # Bundle queries need special note about ref structure
+                return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, status, ref.bundle (direct) OR ref.params[] where param.name == 'bundle'\n"
+            else:
+                return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, status, ref.bundle, ref.params[], startedOn, finishedOn, results[]\n"
+        elif "material" in instruction_lower:
+            # Material queries - show materials path
+            return "# Attestation Structure:\n# input.attestations[] → statement → predicate → materials[]\n# Material fields: uri, digest.sha1, digest.sha256\n"
+        elif "subject" in instruction_lower:
+            # Subject queries - show subject path
+            return "# Attestation Structure:\n# input.attestations[] → statement → subject[]\n# Subject fields: name, digest.sha256\n"
+        else:
+            # Default - generic structure
+            return "# Attestation Structure:\n# input.attestations[] → statement → predicate\n"
+    
+    @staticmethod
     def build_example(
         instruction: str,
         rego_code: str,
@@ -1154,18 +1176,29 @@ class ExampleBuilder:
         # Determine trimming strategy based on instruction
         trimmed_data = ExampleBuilder._trim_attestation(analyzer.data, instruction, metadata)
         
-        # Convert to JSON string
-        context = json.dumps(trimmed_data, indent=2, ensure_ascii=False)
+        # Generate query-specific schema header
+        schema_header = ExampleBuilder._generate_schema_header(instruction, metadata)
         
-        # Validate context size
+        # Convert to JSON string
+        json_str = json.dumps(trimmed_data, indent=2, ensure_ascii=False)
+        
+        # Combine schema header with JSON
+        context = f"{schema_header}\n{json_str}"
+        
+        # Validate context size (schema header adds ~4-5 lines)
         lines = context.split('\n')
+        
         if len(lines) > MAX_CONTEXT_LINES:
             # Try more aggressive trimming
             trimmed_data = ExampleBuilder._aggressive_trim(trimmed_data, metadata)
-            context = json.dumps(trimmed_data, indent=2, ensure_ascii=False)
+            json_str = json.dumps(trimmed_data, indent=2, ensure_ascii=False)
+            # Regenerate context with schema header
+            context = f"{schema_header}\n{json_str}"
             lines = context.split('\n')
             if len(lines) > MAX_CONTEXT_LINES * 1.5:  # Allow some flexibility
-                print(f"Warning: Context still large ({len(lines)} lines) for {analyzer.json_file.name}")
+                schema_lines = len(schema_header.split('\n'))
+                json_lines = len(json_str.split('\n'))
+                print(f"Warning: Context still large ({len(lines)} lines, {schema_lines} schema + {json_lines} JSON) for {analyzer.json_file.name}")
         
         return AttestationExample(
             instruction=instruction,
