@@ -376,9 +376,19 @@ import rego.v1
         return RegoCodeGenerator._wrap_in_rule(code, "task_found", RegoCodeGenerator.USE_FULL_RULES, RegoCodeGenerator.USE_DENY_RULES)
     
     @staticmethod
-    def generate_task_status_check(task_name: str, status: str) -> str:
-        """Generate Rego code to check task status."""
-        code = f"""some att in input.attestations
+    def generate_task_status_check(task_name: str, status: str, use_in: bool = False) -> str:
+        """Generate Rego code to check task status. Optionally use 'in' for membership (style guide)."""
+        if use_in:
+            # Style guide: use 'in' for membership when checking against multiple values
+            valid_statuses = [status, "Completed", "Running"]  # Include related statuses
+            status_set = "{" + ", ".join(f'"{s}"' for s in valid_statuses) + "}"
+            code = f"""some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    task.status in {status_set}"""
+        else:
+            # Standard equality check (also valid)
+            code = f"""some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.name == "{task_name}"
     task.status == "{status}\""""
@@ -426,9 +436,12 @@ import rego.v1
     
     @staticmethod
     def generate_get_subject_digest(index: int = 0) -> str:
-        """Generate Rego code to get subject digest."""
-        code = f"""some att in input.attestations
-    att.statement.subject[{index}].digest.sha256 == digest"""
+        """Generate Rego code to get subject digest. Uses unconditional assignment (style guide)."""
+        # Style guide: prefer unconditional assignment in rule head
+        code = f"""subject_digest := digest if {{
+    some att in input.attestations
+    att.statement.subject[{index}].digest.sha256 == digest
+}}"""
         return RegoCodeGenerator._wrap_in_rule(code, "subject_digest", RegoCodeGenerator.USE_FULL_RULES)
     
     @staticmethod
@@ -458,12 +471,117 @@ import rego.v1
     @staticmethod
     def generate_find_tasks_by_status(status: str) -> str:
         """Generate Rego code to find tasks by status."""
-        code = f"""tasks_with_status := [task |
+        # Use set instead of array (style guide: prefer sets over arrays where applicable)
+        code = f"""tasks_with_status := {{task |
     some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.status == "{status}"
-]"""
+}}"""
         return RegoCodeGenerator._wrap_in_rule(code, "tasks_with_status", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_all_tasks_succeeded() -> str:
+        """Generate Rego code using 'every' for FOR ALL (style guide pattern)."""
+        code = """all_tasks_succeeded if {
+    some att in input.attestations
+    every task in att.statement.predicate.buildConfig.tasks {
+        task.status == "Succeeded"
+    }
+}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "all_tasks_succeeded", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_no_failed_tasks() -> str:
+        """Generate Rego code using 'every' with negation (style guide pattern)."""
+        # Use 'every' with != instead of 'not some' (idiomatic Rego)
+        code = """no_failed_tasks if {
+    some att in input.attestations
+    every task in att.statement.predicate.buildConfig.tasks {
+        task.status != "Failed"
+    }
+}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "no_failed_tasks", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_valid_task_status(task_name: str, valid_statuses: List[str]) -> str:
+        """Generate Rego code using 'in' for membership check (style guide pattern)."""
+        status_set = "{" + ", ".join(f'"{s}"' for s in valid_statuses) + "}"
+        code = f"""some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    task.status in {status_set}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "valid_task_status", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_task_not_found(task_name: str) -> str:
+        """Generate Rego code using 'every' with negation to check if task doesn't exist."""
+        # Use 'every' with != instead of 'not some' (idiomatic Rego)
+        code = f"""task_not_found if {{
+    some att in input.attestations
+    every task in att.statement.predicate.buildConfig.tasks {{
+        task.name != "{task_name}"
+    }}
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "task_not_found", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_task_bundle_with_helper(task_name: str) -> str:
+        """Generate Rego code using helper rule (style guide pattern)."""
+        # Style guide: Use helper rules for readability, leading underscore for internal
+        # This returns code that already has package/import, so _wrap_in_rule won't double-wrap
+        code = f"""package attestation_check
+
+import rego.v1
+
+# Helper rule (style guide: leading underscore for internal use)
+_task_by_name(name) := task if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == name
+}}
+
+# Main rule using helper
+bundle_ref := ref if {{
+    task := _task_by_name("{task_name}")
+    ref := task.ref.bundle
+}} else := ref if {{
+    task := _task_by_name("{task_name}")
+    some param in task.ref.params
+    param.name == "bundle"
+    ref := param.value
+}}"""
+        return code  # Already has package/import, don't wrap
+    
+    @staticmethod
+    def generate_get_task_timestamp(task_name: str, field: str = "startedOn") -> str:
+        """Generate Rego code to get task timestamp (startedOn or finishedOn)."""
+        code = f"""task_timestamp := timestamp if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    timestamp := task.{field}
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "task_timestamp", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_find_subject_by_digest(digest: str) -> str:
+        """Generate Rego code to find subject by digest."""
+        code = f"""subject_found if {{
+    some att in input.attestations
+    some subject in att.statement.subject
+    subject.digest.sha256 == "{digest}"
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "subject_found", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_list_material_uris() -> str:
+        """Generate Rego code to list all material URIs."""
+        code = """material_uris := {uri |
+    some att in input.attestations
+    some material in att.statement.predicate.materials
+    uri := material.uri
+}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "material_uris", RegoCodeGenerator.USE_FULL_RULES)
 
 
 class InstructionGenerator:
@@ -474,54 +592,150 @@ class InstructionGenerator:
         "Find a task named '{task_name}' in the attestation",
         "Check if there is a task called '{task_name}'",
         "Look for a task with name '{task_name}' in the attestation",
+        "Does the attestation contain a task named '{task_name}'?",
+        "Search for task '{task_name}' in the attestation",
+        "Verify if task '{task_name}' exists in the attestation",
+        "Check whether task '{task_name}' is present",
     ]
     
     TASK_STATUS_TEMPLATES = [
         "Get the status of task '{task_name}'",
         "Check the status of task '{task_name}'",
         "Find the status for task '{task_name}'",
+        "What is the status of task '{task_name}'?",
+        "Retrieve the status for task '{task_name}'",
+        "Determine the status of task '{task_name}'",
     ]
     
     LIST_TASKS_TEMPLATES = [
         "List all task names in the attestation",
         "Get all task names from the attestation",
         "Find all task names",
+        "What are all the task names?",
+        "Retrieve all task names",
+        "Show all task names in the attestation",
     ]
     
     TASK_RESULTS_TEMPLATES = [
         "Get all results from task '{task_name}'",
         "Find all results for task '{task_name}'",
         "List the results from task '{task_name}'",
+        "What are the results from task '{task_name}'?",
+        "Retrieve results for task '{task_name}'",
+        "Show all results from task '{task_name}'",
     ]
     
     TASK_BUNDLE_TEMPLATES = [
         "Get the bundle reference for task '{task_name}'",
         "Find the bundle used by task '{task_name}'",
         "Get the bundle for task '{task_name}'",
+        "What bundle is used by task '{task_name}'?",
+        "Retrieve the bundle reference for task '{task_name}'",
+        "Find the bundle image for task '{task_name}'",
+    ]
+    
+    TASK_TIMESTAMP_TEMPLATES = [
+        "When did task '{task_name}' start?",
+        "Get the start time for task '{task_name}'",
+        "Find when task '{task_name}' started",
+        "What is the startedOn timestamp for task '{task_name}'?",
+        "When did task '{task_name}' finish?",
+        "Get the finish time for task '{task_name}'",
+        "Find when task '{task_name}' finished",
+        "What is the finishedOn timestamp for task '{task_name}'?",
     ]
     
     SUBJECT_DIGEST_TEMPLATES = [
         "Get the SHA256 digest of the first subject",
         "Find the digest of the first subject",
         "Get the first subject's SHA256 digest",
+        "What is the SHA256 digest of the first subject?",
+        "Retrieve the digest for the first subject",
     ]
     
     LIST_SUBJECTS_TEMPLATES = [
         "List all subject names in the attestation",
         "Get all subject names",
         "Find all subject names",
+        "What are all the subject names?",
+        "Show all subject names",
+        "Retrieve all subject names from the attestation",
+    ]
+    
+    SUBJECT_BY_DIGEST_TEMPLATES = [
+        "Find the subject with SHA256 digest '{digest}'",
+        "Get the subject that has digest '{digest}'",
+        "Which subject has the digest '{digest}'?",
+        "Locate the subject with digest '{digest}'",
     ]
     
     MATERIAL_TEMPLATES = [
         "Check if material exists for git repo '{uri}' and commit '{commit}'",
         "Find material with URI '{uri}' and commit '{commit}'",
         "Check for material matching URI '{uri}' and commit '{commit}'",
+        "Does the attestation contain material with URI '{uri}' and commit '{commit}'?",
+        "Verify material exists with URI '{uri}' and commit '{commit}'",
+    ]
+    
+    MATERIAL_URI_ONLY_TEMPLATES = [
+        "Check if material exists with URI '{uri}'",
+        "Find material with URI '{uri}'",
+        "Does the attestation contain material with URI '{uri}'?",
+        "Check for material matching URI '{uri}'",
+        "Verify material exists with URI '{uri}'",
+    ]
+    
+    LIST_MATERIALS_TEMPLATES = [
+        "List all material URIs in the attestation",
+        "Get all material URIs",
+        "Find all material URIs",
+        "What are all the material URIs?",
+        "Show all material URIs",
     ]
     
     TASK_STATUS_FILTER_TEMPLATES = [
         "Find all tasks with status '{status}'",
         "Get all tasks that have status '{status}'",
         "List tasks with status '{status}'",
+        "What tasks have status '{status}'?",
+        "Show all tasks with status '{status}'",
+        "Retrieve all tasks that succeeded",
+        "Find all tasks that failed",
+        "Get all succeeded tasks",
+        "List all failed tasks",
+    ]
+    
+    # Style guide patterns: every (FOR ALL)
+    ALL_TASKS_SUCCEEDED_TEMPLATES = [
+        "Check if all tasks succeeded",
+        "Verify all tasks have status 'Succeeded'",
+        "Ensure all tasks completed successfully",
+        "Check that every task succeeded",
+        "Verify every task has status 'Succeeded'",
+        "Ensure all tasks in the attestation succeeded",
+    ]
+    
+    # Style guide patterns: not (negation)
+    NO_FAILED_TASKS_TEMPLATES = [
+        "Check if no tasks failed",
+        "Verify no tasks have status 'Failed'",
+        "Ensure no tasks failed",
+        "Check that no tasks have status 'Failed'",
+        "Verify there are no failed tasks",
+    ]
+    
+    TASK_NOT_FOUND_TEMPLATES = [
+        "Check if task '{task_name}' does not exist",
+        "Verify task '{task_name}' is not present",
+        "Ensure task '{task_name}' does not exist in the attestation",
+    ]
+    
+    # Style guide patterns: in (membership)
+    VALID_TASK_STATUS_TEMPLATES = [
+        "Check if task '{task_name}' has a valid status",
+        "Verify task '{task_name}' status is valid",
+        "Check if task '{task_name}' status is one of the allowed values",
+        "Verify task '{task_name}' has an acceptable status",
     ]
     
     @staticmethod
@@ -542,10 +756,20 @@ class InstructionGenerator:
             # Task status check
             task = next((t for t in tasks if t.get("name") == task_name), None)
             if task and task.get("status"):
+                # 80% use standard equality, 20% use 'in' for membership (style guide)
+                use_in = random.random() < 0.2
                 template = random.choice(InstructionGenerator.TASK_STATUS_TEMPLATES)
                 instruction = template.format(task_name=task_name)
-                rego_code = RegoCodeGenerator.generate_task_status_check(task_name, task["status"])
+                rego_code = RegoCodeGenerator.generate_task_status_check(task_name, task["status"], use_in=use_in)
                 examples.append((instruction, rego_code, {"task_name": task_name, "status": task["status"]}))
+                
+                # Add valid status check (style guide: use 'in' for membership)
+                if use_in:
+                    template = random.choice(InstructionGenerator.VALID_TASK_STATUS_TEMPLATES)
+                    instruction = template.format(task_name=task_name)
+                    valid_statuses = [task["status"], "Completed", "Running"]
+                    rego_code = RegoCodeGenerator.generate_valid_task_status(task_name, valid_statuses)
+                    examples.append((instruction, rego_code, {"task_name": task_name, "valid_statuses": valid_statuses}))
             
             # Task results
             if task and task.get("results"):
@@ -561,9 +785,14 @@ class InstructionGenerator:
                 any(p.get("name") == "bundle" for p in ref.get("params", []))
             )
             if task and has_bundle:
+                # 80% use standard pattern, 20% use helper rule (style guide)
+                use_helper = random.random() < 0.2
                 template = random.choice(InstructionGenerator.TASK_BUNDLE_TEMPLATES)
                 instruction = template.format(task_name=task_name)
-                rego_code = RegoCodeGenerator.generate_get_task_bundle(task_name)
+                if use_helper:
+                    rego_code = RegoCodeGenerator.generate_task_bundle_with_helper(task_name)
+                else:
+                    rego_code = RegoCodeGenerator.generate_get_task_bundle(task_name)
                 examples.append((instruction, rego_code, {"task_name": task_name}))
         
         # List all task names (once per attestation)
@@ -573,13 +802,80 @@ class InstructionGenerator:
             rego_code = RegoCodeGenerator.generate_list_task_names()
             examples.append((instruction, rego_code, {}))
         
-        # Find tasks by status
+        # Style guide: Add 'every' FOR ALL queries
+        if tasks:
+            # Check if all tasks succeeded
+            all_succeeded = all(task.get("status") == "Succeeded" for task in tasks if task.get("status"))
+            if all_succeeded or random.random() < 0.3:  # 30% chance to add this query
+                template = random.choice(InstructionGenerator.ALL_TASKS_SUCCEEDED_TEMPLATES)
+                instruction = template
+                rego_code = RegoCodeGenerator.generate_all_tasks_succeeded()
+                examples.append((instruction, rego_code, {}))
+            
+            # Style guide: Add 'not' negation queries
+            has_failed = any(task.get("status") == "Failed" for task in tasks if task.get("status"))
+            if not has_failed or random.random() < 0.3:  # 30% chance to add this query
+                template = random.choice(InstructionGenerator.NO_FAILED_TASKS_TEMPLATES)
+                instruction = template
+                rego_code = RegoCodeGenerator.generate_no_failed_tasks()
+                examples.append((instruction, rego_code, {}))
+        
+        # Style guide: Add task not found queries (negation)
+        # Use a task name that doesn't exist in this attestation
+        fake_task_names = ["non-existent-task", "missing-task", "unknown-task"]
+        if random.random() < 0.2:  # 20% chance to add negation query
+            fake_name = random.choice(fake_task_names)
+            template = random.choice(InstructionGenerator.TASK_NOT_FOUND_TEMPLATES)
+            instruction = template.format(task_name=fake_name)
+            rego_code = RegoCodeGenerator.generate_task_not_found(fake_name)
+            examples.append((instruction, rego_code, {"task_name": fake_name}))
+        
+        # Find tasks by status - generate multiple examples per status for better coverage
         statuses = {task.get("status") for task in tasks if task.get("status")}
         for status in statuses:
-            template = random.choice(InstructionGenerator.TASK_STATUS_FILTER_TEMPLATES)
-            instruction = template.format(status=status)
-            rego_code = RegoCodeGenerator.generate_find_tasks_by_status(status)
-            examples.append((instruction, rego_code, {"status": status}))
+            # Generate 3-4 examples per status to increase coverage
+            # Filter templates that work with the status
+            status_lower = status.lower()
+            if "succeed" in status_lower:
+                # Use templates that mention "succeeded" or work generically
+                available_templates = [t for t in InstructionGenerator.TASK_STATUS_FILTER_TEMPLATES if "{status}" in t or "succeed" in t.lower()]
+            elif "fail" in status_lower:
+                # Use templates that mention "failed" or work generically
+                available_templates = [t for t in InstructionGenerator.TASK_STATUS_FILTER_TEMPLATES if "{status}" in t or "fail" in t.lower()]
+            else:
+                # Use templates with {status} placeholder
+                available_templates = [t for t in InstructionGenerator.TASK_STATUS_FILTER_TEMPLATES if "{status}" in t]
+            
+            if not available_templates:
+                available_templates = [t for t in InstructionGenerator.TASK_STATUS_FILTER_TEMPLATES if "{status}" in t]
+            
+            num_examples = min(4, len(available_templates))
+            selected_templates = random.sample(available_templates, num_examples)
+            for template in selected_templates:
+                # Handle templates that don't need status parameter
+                if "{status}" in template:
+                    instruction = template.format(status=status)
+                else:
+                    # For templates like "Retrieve all tasks that succeeded"
+                    instruction = template
+                rego_code = RegoCodeGenerator.generate_find_tasks_by_status(status)
+                examples.append((instruction, rego_code, {"status": status}))
+        
+        # Task timestamps (startedOn, finishedOn)
+        for task_name in task_names:
+            task = next((t for t in tasks if t.get("name") == task_name), None)
+            if task:
+                if task.get("startedOn"):
+                    template = random.choice([t for t in InstructionGenerator.TASK_TIMESTAMP_TEMPLATES if "start" in t.lower()])
+                    instruction = template.format(task_name=task_name)
+                    rego_code = RegoCodeGenerator.generate_get_task_timestamp(task_name, "startedOn")
+                    examples.append((instruction, rego_code, {"task_name": task_name, "field": "startedOn"}))
+                
+                if task.get("finishedOn"):
+                    template = random.choice([t for t in InstructionGenerator.TASK_TIMESTAMP_TEMPLATES if "finish" in t.lower()])
+                    instruction = template.format(task_name=task_name)
+                    rego_code = RegoCodeGenerator.generate_get_task_timestamp(task_name, "finishedOn")
+                    examples.append((instruction, rego_code, {"task_name": task_name, "field": "finishedOn"}))
         
         return examples
     
@@ -600,6 +896,15 @@ class InstructionGenerator:
             instruction = template
             rego_code = RegoCodeGenerator.generate_list_subject_names()
             examples.append((instruction, rego_code, {}))
+            
+            # Subject by digest lookup (for first few subjects with digests)
+            for subject in subjects[:2]:  # Limit to first 2 to avoid too many
+                digest = subject.get("digest", {}).get("sha256")
+                if digest:
+                    template = random.choice(InstructionGenerator.SUBJECT_BY_DIGEST_TEMPLATES)
+                    instruction = template.format(digest=digest)
+                    rego_code = RegoCodeGenerator.generate_find_subject_by_digest(digest)
+                    examples.append((instruction, rego_code, {"digest": digest}))
         
         return examples
     
@@ -608,16 +913,31 @@ class InstructionGenerator:
         """Generate instructions for material-related queries."""
         examples = []
         
+        # List all materials (once per attestation)
+        if materials:
+            template = random.choice(InstructionGenerator.LIST_MATERIALS_TEMPLATES)
+            instruction = template
+            rego_code = RegoCodeGenerator.generate_list_material_uris()
+            examples.append((instruction, rego_code, {}))
+        
         for material in materials:
             uri = material.get("uri")
             digest = material.get("digest", {})
             commit = digest.get("sha1") or digest.get("sha256")
             
-            if uri and commit:
-                template = random.choice(InstructionGenerator.MATERIAL_TEMPLATES)
-                instruction = template.format(uri=uri, commit=commit)
-                rego_code = RegoCodeGenerator.generate_check_material(uri, commit)
-                examples.append((instruction, rego_code, {"uri": uri, "commit": commit}))
+            if uri:
+                # Material with URI and commit (if available)
+                if commit:
+                    template = random.choice(InstructionGenerator.MATERIAL_TEMPLATES)
+                    instruction = template.format(uri=uri, commit=commit)
+                    rego_code = RegoCodeGenerator.generate_check_material(uri, commit)
+                    examples.append((instruction, rego_code, {"uri": uri, "commit": commit}))
+                
+                # Material with URI only (add this for more diversity)
+                template = random.choice(InstructionGenerator.MATERIAL_URI_ONLY_TEMPLATES)
+                instruction = template.format(uri=uri)
+                rego_code = RegoCodeGenerator.generate_check_material(uri, None)
+                examples.append((instruction, rego_code, {"uri": uri}))
         
         return examples
 
@@ -708,6 +1028,41 @@ def check_opa_available() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _validate_attestation_parsing(rego_code: str, instruction: str) -> bool:
+    """Validate that Rego code correctly parses attestations (primary requirement)."""
+    # Must navigate attestations
+    if "input.attestations" not in rego_code:
+        return False
+    
+    # Must navigate statement
+    if "statement" not in rego_code:
+        return False
+    
+    # Check for correct field access based on instruction
+    instruction_lower = instruction.lower()
+    
+    if "task" in instruction_lower:
+        # Task queries must access tasks
+        if "tasks" not in rego_code and "buildConfig" not in rego_code:
+            return False
+    
+    if "subject" in instruction_lower:
+        # Subject queries must access subject
+        if "subject" not in rego_code:
+            return False
+    
+    if "material" in instruction_lower:
+        # Material queries must access materials
+        if "materials" not in rego_code:
+            return False
+    
+    # Must use 'some' for iteration (declarative style)
+    if "some " not in rego_code:
+        return False
+    
+    return True
 
 
 def validate_rego_syntax(rego_code: str) -> bool:
@@ -849,14 +1204,19 @@ Examples:
         
         # Generate task-related examples (limit to avoid too many per file)
         task_examples = InstructionGenerator.generate_task_instructions(tasks)
-        # Limit to max 15 task examples per file
-        if len(task_examples) > 15:
-            task_examples = random.sample(task_examples, 15)
+        # Limit to max 20 task examples per file (increased from 15 for more coverage)
+        if len(task_examples) > 20:
+            task_examples = random.sample(task_examples, 20)
         
         for instruction, rego_code, metadata in task_examples:
-            # Validate Rego syntax
+            # Primary validation: Rego syntax (must pass)
             if not validate_rego_syntax(rego_code):
                 print(f"  Warning: Invalid Rego code for instruction: {instruction[:50]}...")
+                continue
+            
+            # Secondary validation: Attestation parsing correctness (must pass)
+            if not _validate_attestation_parsing(rego_code, instruction):
+                print(f"  Warning: Attestation parsing issue for instruction: {instruction[:50]}...")
                 continue
             
             example = ExampleBuilder.build_example(instruction, rego_code, analyzer, metadata)
@@ -868,14 +1228,18 @@ Examples:
         for instruction, rego_code, metadata in subject_examples:
             if not validate_rego_syntax(rego_code):
                 continue
+            if not _validate_attestation_parsing(rego_code, instruction):
+                continue
             example = ExampleBuilder.build_example(instruction, rego_code, analyzer, metadata)
             if example:
                 all_examples.append(example)
         
         # Generate material-related examples (limit to avoid too many)
-        material_examples = InstructionGenerator.generate_material_instructions(materials[:3])  # Limit to first 3
+        material_examples = InstructionGenerator.generate_material_instructions(materials[:5])  # Limit to first 5 (increased from 3)
         for instruction, rego_code, metadata in material_examples:
             if not validate_rego_syntax(rego_code):
+                continue
+            if not _validate_attestation_parsing(rego_code, instruction):
                 continue
             example = ExampleBuilder.build_example(instruction, rego_code, analyzer, metadata)
             if example:
