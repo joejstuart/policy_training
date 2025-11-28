@@ -12,11 +12,32 @@ This script is specialized for policy rule training with:
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+# Fix CUDA/NVML initialization issues
+# Set CUDA device before importing torch to avoid NVML errors
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU by default
+
+# Disable CUDA memory pool issues
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+
 import argparse
 import json
-import os
 import sys
 import torch
+
+# Initialize CUDA properly before any operations
+# This helps avoid NVML initialization errors
+# Note: torch.cuda.init() doesn't exist - CUDA initializes automatically
+# We just need to ensure proper device selection
+try:
+    if torch.cuda.is_available():
+        # Access CUDA device to trigger initialization
+        _ = torch.cuda.current_device()
+        torch.cuda.empty_cache()
+except Exception as e:
+    print(f"⚠ Warning: CUDA initialization issue: {e}")
+    print("  Continuing anyway - may fall back to CPU if needed")
 from dataclasses import dataclass
 from pathlib import Path
 from torch.utils.data import Dataset
@@ -235,8 +256,16 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
         device = torch.device("mps")  # Apple GPU
         device_name = "MPS (Apple Silicon GPU)"
     elif torch.cuda.is_available():
-        device = torch.device("cuda")
-        device_name = f"CUDA (GPU: {torch.cuda.get_device_name(0)})"
+        try:
+            # Try to initialize CUDA properly
+            torch.cuda.init()
+            device = torch.device("cuda")
+            device_name = f"CUDA (GPU: {torch.cuda.get_device_name(0)})"
+        except Exception as e:
+            print(f"⚠ CUDA initialization failed: {e}")
+            print("  Falling back to CPU")
+            device = torch.device("cpu")
+            device_name = "CPU"
     else:
         device = torch.device("cpu")
         device_name = "CPU"
