@@ -58,6 +58,59 @@ QWEN_SYSTEM_PROMPT = (
     "Then output only the final Rego code."
 )
 
+# System prompt for attestation parsing (with style guide awareness)
+QWEN_SYSTEM_PROMPT_ATTESTATION = (
+    "You are an expert Rego/OPA policy assistant for attestation parsing. "
+    "You write Rego code that correctly parses attestation JSON structures.\n\n"
+    "Follow Rego style guide best practices:\n"
+    "- Use 'in' for membership checks when checking multiple values\n"
+    "- Use 'every' for FOR ALL queries (e.g., 'all tasks succeeded')\n"
+    "- Use 'some ... in' for iteration (declarative pattern)\n"
+    "- Prefer sets over arrays when order doesn't matter\n"
+    "- Use unconditional assignment in rule head when possible\n"
+    "- Use snake_case for all variable and rule names\n"
+    "- Always include 'package attestation_check' and 'import rego.v1'\n\n"
+    "Generate valid Rego code that correctly navigates attestation structures "
+    "(input.attestations -> statement -> predicate -> buildConfig.tasks, etc.)."
+)
+
+# Condensed Rego style guide for attestation parsing (~310 tokens)
+STYLE_GUIDE_CONDENSED = """# Rego Style Guide - Key Patterns for Attestation Parsing
+
+## Critical Patterns:
+
+1. **Use `in` for membership checks**: 
+   - Prefer: `task.status in {"Succeeded", "Failed"}`
+   - Avoid: `task.status == "Succeeded"` (when checking multiple values)
+
+2. **Use `every` for FOR ALL queries**:
+   - Prefer: `every task in att.statement.predicate.buildConfig.tasks { task.status == "Succeeded" }`
+   - Use for: "all tasks succeeded", "verify all tasks have X"
+
+3. **Use `some ... in` for iteration**:
+   - Prefer: `some task in att.statement.predicate.buildConfig.tasks`
+   - This is the modern, declarative pattern
+
+4. **Prefer sets over arrays when order doesn't matter**:
+   - Prefer: `task_names := {name | ...}`
+   - Avoid: `task_names := [name | ...]` (unless order matters)
+
+5. **Unconditional assignment in rule head**:
+   - Prefer: `result := value if { ... }`
+   - Avoid: `result if { value := ... }`
+
+6. **Helper rules with leading underscore**:
+   - Use: `_helper_name()` for internal helpers
+   - Example: `_task_by_name(name) := task if { ... }`
+
+7. **snake_case for all names**:
+   - Use: `task_name`, `bundle_ref`, `subject_digest`
+   - Avoid: `taskName`, `bundleRef`
+
+8. **Package and import**:
+   - Always include: `package attestation_check` and `import rego.v1`
+"""
+
 
 def load_policy_model(base_model: str, model_dir: str = None, device: str = "mps", no_lora: bool = False):
     """Load the policy model (base model, full fine-tuned model, or base with LoRA adapters).
@@ -406,7 +459,7 @@ def generate_response(tokenizer, model, device, messages, max_tokens=512, temper
     return response
 
 
-def interactive_chat(tokenizer, model, device, builder=None, default_package=None, validate=True, max_corrections=3):
+def interactive_chat(tokenizer, model, device, builder=None, default_package=None, validate=True, max_corrections=3, include_style_guide=False):
     """Run interactive chat mode with dynamic context building.
     
     Args:
@@ -466,14 +519,36 @@ def interactive_chat(tokenizer, model, device, builder=None, default_package=Non
                     package = parts[0].strip()
                     instruction = parts[1].strip()
             
+            # Auto-detect if this is an attestation parsing task
+            is_attestation_task = any(keyword in instruction.lower() for keyword in [
+                'attestation', 'task', 'subject', 'material', 'bundle', 'digest',
+                'succeeded', 'failed', 'status', 'timestamp', 'finishedon', 'startedon'
+            ])
+            
+            # Choose system prompt based on task type (update if needed)
+            if is_attestation_task and messages[0]["content"] != QWEN_SYSTEM_PROMPT_ATTESTATION:
+                messages[0]["content"] = QWEN_SYSTEM_PROMPT_ATTESTATION
+            elif not is_attestation_task and messages[0]["content"] != QWEN_SYSTEM_PROMPT:
+                messages[0]["content"] = QWEN_SYSTEM_PROMPT
+            
             # Build context if builder is available
+            context_parts = []
+            
+            # Add style guide if requested
+            if include_style_guide:
+                context_parts.append(STYLE_GUIDE_CONDENSED)
+            
             if builder:
                 try:
                     built_context = builder.build_context(instruction, package=package)
-                    user_content = f"{built_context}\n\nInstruction: {instruction}"
+                    context_parts.append(built_context)
                 except Exception as e:
                     print(f"⚠ Warning: Failed to build context: {e}")
-                    user_content = instruction
+            
+            # Combine context parts
+            if context_parts:
+                combined_context = "\n\n".join(context_parts)
+                user_content = f"{combined_context}\n\nInstruction: {instruction}"
             else:
                 user_content = instruction
             
@@ -525,7 +600,7 @@ def interactive_chat(tokenizer, model, device, builder=None, default_package=Non
 def single_inference(
     tokenizer, model, device, instruction, 
     context=None, builder=None, package=None, max_tokens=1024,
-    validate=True, max_corrections=3
+    validate=True, max_corrections=3, include_style_guide=False
 ):
     """Run a single inference with dynamic context building.
     
@@ -538,34 +613,56 @@ def single_inference(
         builder: SmartContextBuilder instance (optional, for dynamic context)
         package: Optional package name for context building
         max_tokens: Maximum tokens to generate
+        include_style_guide: If True, include condensed style guide in context
     """
+    # Auto-detect if this is an attestation parsing task
+    is_attestation_task = any(keyword in instruction.lower() for keyword in [
+        'attestation', 'task', 'subject', 'material', 'bundle', 'digest',
+        'succeeded', 'failed', 'status', 'timestamp', 'finishedon', 'startedon'
+    ])
+    
+    # Choose system prompt based on task type
+    if is_attestation_task:
+        system_prompt = QWEN_SYSTEM_PROMPT_ATTESTATION
+    else:
+        system_prompt = QWEN_SYSTEM_PROMPT
+    
     messages = [
-        {"role": "system", "content": QWEN_SYSTEM_PROMPT}
+        {"role": "system", "content": system_prompt}
     ]
     
     # Build context dynamically if builder is available
+    context_parts = []
+    
+    # Add style guide if requested
+    if include_style_guide:
+        context_parts.append(STYLE_GUIDE_CONDENSED)
+        print("✓ Including Rego style guide in context")
+    
     if builder and not context:
         print("Building dynamic context from libraries...")
         try:
             built_context = builder.build_context(instruction, package=package)
+            context_parts.append(built_context)
             
             print("Context built:")
             print("-" * 60)
             print(built_context)
             print("-" * 60)
             print()
-            
-            # Simple instruction format (no verbose thinking prompt)
-            user_content = f"{built_context}\n\nInstruction: {instruction}"
         except Exception as e:
             print(f"Warning: Failed to build dynamic context: {e}")
             import traceback
             traceback.print_exc()
             print("Falling back to instruction only.")
-            user_content = instruction
     elif context:
         # Use provided static context
-        user_content = f"{context}\n\nInstruction: {instruction}"
+        context_parts.append(context)
+    
+    # Combine context parts
+    if context_parts:
+        combined_context = "\n\n".join(context_parts)
+        user_content = f"{combined_context}\n\nInstruction: {instruction}"
     else:
         # No context available
         user_content = instruction
@@ -727,6 +824,11 @@ Examples (using base model only - for comparison):
         default=3,
         help="Maximum number of correction attempts when validation fails (default: 3)",
     )
+    parser.add_argument(
+        "--include-style-guide",
+        action="store_true",
+        help="Include condensed Rego style guide in context (~310 tokens). Helps ensure style guide compliance.",
+    )
     
     args = parser.parse_args()
     
@@ -809,7 +911,8 @@ Examples (using base model only - for comparison):
             package=args.package,
             max_tokens=args.max_tokens,
             validate=not args.no_validate,
-            max_corrections=args.max_corrections
+            max_corrections=args.max_corrections,
+            include_style_guide=args.include_style_guide
         )
     else:
         # Interactive chat mode
@@ -820,7 +923,8 @@ Examples (using base model only - for comparison):
             builder=builder,
             default_package=args.package,
             validate=not args.no_validate,
-            max_corrections=args.max_corrections
+            max_corrections=args.max_corrections,
+            include_style_guide=args.include_style_guide
         )
 
 
