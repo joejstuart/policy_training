@@ -395,6 +395,52 @@ import rego.v1
         return RegoCodeGenerator._wrap_in_rule(code, "task_status_check", RegoCodeGenerator.USE_FULL_RULES, RegoCodeGenerator.USE_DENY_RULES)
     
     @staticmethod
+    def generate_check_task_status_value(task_name: str, status: str) -> str:
+        """Generate Rego code to check if task has a specific status value (validation/deny rule)."""
+        # Multiple instruction variations should map to this same code
+        code = f"""deny contains result if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    task.status == "{status}"
+    result := {{"msg": "Policy violation found"}}
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
+    
+    @staticmethod
+    def generate_check_material_value(uri: str, commit: Optional[str] = None) -> str:
+        """Generate Rego code to check if material exists with specific URI/commit (validation/deny rule)."""
+        # Multiple instruction variations should map to this same code
+        if commit:
+            code = f"""deny contains result if {{
+    some att in input.attestations
+    some material in att.statement.predicate.materials
+    material.uri == "{uri}"
+    material.digest.sha1 == "{commit}"
+    result := {{"msg": "Policy violation found"}}
+}}"""
+        else:
+            code = f"""deny contains result if {{
+    some att in input.attestations
+    some material in att.statement.predicate.materials
+    material.uri == "{uri}"
+    result := {{"msg": "Policy violation found"}}
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
+    
+    @staticmethod
+    def generate_check_subject_digest_value(digest: str) -> str:
+        """Generate Rego code to check if subject has a specific digest (validation/deny rule)."""
+        # Multiple instruction variations should map to this same code
+        code = f"""deny contains result if {{
+    some att in input.attestations
+    some subject in att.statement.subject
+    subject.digest.sha256 == "{digest}"
+    result := {{"msg": "Policy violation found"}}
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
+    
+    @staticmethod
     def generate_list_task_names() -> str:
         """Generate Rego code to list all task names."""
         code = """task_names := {name |
@@ -433,6 +479,32 @@ import rego.v1
     ref := param.value
 }}"""
         return RegoCodeGenerator._wrap_in_rule(code, "bundle_ref", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_check_task_bundle_value(task_name: str, bundle_value: str) -> str:
+        """Generate Rego code to check if task has a specific bundle value (validation/deny rule)."""
+        # This generates a deny rule that checks if bundle equals a specific value
+        # Multiple instruction variations should map to this same code
+        # Use separate rules for ref.bundle and ref.params (can't use else with deny contains)
+        code = f"""deny contains result if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    bundle := task.ref.bundle
+    bundle == "{bundle_value}"
+    result := {{"msg": "Policy violation found"}}
+}}
+
+deny contains result if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    some param in task.ref.params
+    param.name == "bundle"
+    param.value == "{bundle_value}"
+    result := {{"msg": "Policy violation found"}}
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
     
     @staticmethod
     def generate_get_subject_digest(index: int = 0) -> str:
@@ -607,6 +679,20 @@ class InstructionGenerator:
         "Determine the status of task '{task_name}'",
     ]
     
+    # Validation templates for status - multiple variations that should produce the same deny/check code
+    TASK_STATUS_CHECK_TEMPLATES = [
+        "Check if task '{task_name}' has status '{status}'",
+        "Check if task '{task_name}' status is '{status}'",
+        "Verify task '{task_name}' has status '{status}'",
+        "Verify task '{task_name}' status equals '{status}'",
+        "Deny if task '{task_name}' has status '{status}'",
+        "Deny if task '{task_name}' status is '{status}'",
+        "Check if any attestation has task '{task_name}' with status '{status}'",
+        "Check that task '{task_name}' has status '{status}'",
+        "Ensure task '{task_name}' status is '{status}'",
+        "Check if task '{task_name}' status equals '{status}'",
+    ]
+    
     LIST_TASKS_TEMPLATES = [
         "List all task names in the attestation",
         "Get all task names from the attestation",
@@ -632,6 +718,24 @@ class InstructionGenerator:
         "What bundle is used by task '{task_name}'?",
         "Retrieve the bundle reference for task '{task_name}'",
         "Find the bundle image for task '{task_name}'",
+    ]
+    
+    # Validation templates - multiple variations that should produce the same deny/check code
+    TASK_BUNDLE_CHECK_TEMPLATES = [
+        "Check if task '{task_name}' has bundle reference '{bundle_value}'",
+        "Check if task '{task_name}' uses bundle '{bundle_value}'",
+        "Verify task '{task_name}' has bundle reference '{bundle_value}'",
+        "Verify task '{task_name}' uses bundle '{bundle_value}'",
+        "Deny if task '{task_name}' has bundle reference '{bundle_value}'",
+        "Deny if task '{task_name}' uses bundle '{bundle_value}'",
+        "Check if any attestation has task '{task_name}' with bundle reference '{bundle_value}'",
+        "Check if any attestation has task '{task_name}' using bundle '{bundle_value}'",
+        "Verify any attestation has task '{task_name}' with bundle '{bundle_value}'",
+        "Deny if any attestation has task '{task_name}' with bundle reference '{bundle_value}'",
+        "Check that task '{task_name}' has bundle reference '{bundle_value}'",
+        "Ensure task '{task_name}' uses bundle '{bundle_value}'",
+        "Check if task '{task_name}' bundle equals '{bundle_value}'",
+        "Verify task '{task_name}' bundle is '{bundle_value}'",
     ]
     
     TASK_TIMESTAMP_TEMPLATES = [
@@ -669,6 +773,17 @@ class InstructionGenerator:
         "Locate the subject with digest '{digest}'",
     ]
     
+    # Validation templates for subject digest - multiple variations that should produce the same deny/check code
+    SUBJECT_DIGEST_CHECK_TEMPLATES = [
+        "Check if subject has SHA256 digest '{digest}'",
+        "Check if any subject has digest '{digest}'",
+        "Verify subject has SHA256 digest '{digest}'",
+        "Verify any attestation has subject with digest '{digest}'",
+        "Deny if subject has SHA256 digest '{digest}'",
+        "Check that subject digest equals '{digest}'",
+        "Ensure subject has SHA256 digest '{digest}'",
+    ]
+    
     MATERIAL_TEMPLATES = [
         "Check if material exists for git repo '{uri}' and commit '{commit}'",
         "Find material with URI '{uri}' and commit '{commit}'",
@@ -683,6 +798,25 @@ class InstructionGenerator:
         "Does the attestation contain material with URI '{uri}'?",
         "Check for material matching URI '{uri}'",
         "Verify material exists with URI '{uri}'",
+    ]
+    
+    # Validation templates for materials - multiple variations that should produce the same deny/check code
+    MATERIAL_CHECK_TEMPLATES = [
+        "Check if material exists with URI '{uri}' and commit '{commit}'",
+        "Verify material exists with URI '{uri}' and commit '{commit}'",
+        "Deny if material exists with URI '{uri}' and commit '{commit}'",
+        "Check that material has URI '{uri}' and commit '{commit}'",
+        "Verify any attestation has material with URI '{uri}' and commit '{commit}'",
+        "Check if any attestation contains material with URI '{uri}' and commit '{commit}'",
+    ]
+    
+    MATERIAL_URI_CHECK_TEMPLATES = [
+        "Check if material exists with URI '{uri}'",
+        "Verify material exists with URI '{uri}'",
+        "Deny if material exists with URI '{uri}'",
+        "Check that material has URI '{uri}'",
+        "Verify any attestation has material with URI '{uri}'",
+        "Check if any attestation contains material with URI '{uri}'",
     ]
     
     LIST_MATERIALS_TEMPLATES = [
@@ -756,20 +890,33 @@ class InstructionGenerator:
             # Task status check
             task = next((t for t in tasks if t.get("name") == task_name), None)
             if task and task.get("status"):
-                # 80% use standard equality, 20% use 'in' for membership (style guide)
-                use_in = random.random() < 0.2
-                template = random.choice(InstructionGenerator.TASK_STATUS_TEMPLATES)
-                instruction = template.format(task_name=task_name)
-                rego_code = RegoCodeGenerator.generate_task_status_check(task_name, task["status"], use_in=use_in)
-                examples.append((instruction, rego_code, {"task_name": task_name, "status": task["status"]}))
+                status = task["status"]
                 
-                # Add valid status check (style guide: use 'in' for membership)
-                if use_in:
-                    template = random.choice(InstructionGenerator.VALID_TASK_STATUS_TEMPLATES)
+                # 50% retrieval queries, 50% validation queries (with value check)
+                if random.random() < 0.5:
+                    # Generate validation queries - multiple instruction variations for same code
+                    num_variations = random.randint(3, 5)  # Generate 3-5 variations per status
+                    for _ in range(num_variations):
+                        template = random.choice(InstructionGenerator.TASK_STATUS_CHECK_TEMPLATES)
+                        instruction = template.format(task_name=task_name, status=status)
+                        rego_code = RegoCodeGenerator.generate_check_task_status_value(task_name, status)
+                        examples.append((instruction, rego_code, {"task_name": task_name, "status": status, "query_type": "validation"}))
+                else:
+                    # Generate retrieval queries
+                    # 80% use standard equality, 20% use 'in' for membership (style guide)
+                    use_in = random.random() < 0.2
+                    template = random.choice(InstructionGenerator.TASK_STATUS_TEMPLATES)
                     instruction = template.format(task_name=task_name)
-                    valid_statuses = [task["status"], "Completed", "Running"]
-                    rego_code = RegoCodeGenerator.generate_valid_task_status(task_name, valid_statuses)
-                    examples.append((instruction, rego_code, {"task_name": task_name, "valid_statuses": valid_statuses}))
+                    rego_code = RegoCodeGenerator.generate_task_status_check(task_name, status, use_in=use_in)
+                    examples.append((instruction, rego_code, {"task_name": task_name, "status": status, "query_type": "retrieval"}))
+                    
+                    # Add valid status check (style guide: use 'in' for membership)
+                    if use_in:
+                        template = random.choice(InstructionGenerator.VALID_TASK_STATUS_TEMPLATES)
+                        instruction = template.format(task_name=task_name)
+                        valid_statuses = [status, "Completed", "Running"]
+                        rego_code = RegoCodeGenerator.generate_valid_task_status(task_name, valid_statuses)
+                        examples.append((instruction, rego_code, {"task_name": task_name, "valid_statuses": valid_statuses}))
             
             # Task results
             if task and task.get("results"):
@@ -785,15 +932,33 @@ class InstructionGenerator:
                 any(p.get("name") == "bundle" for p in ref.get("params", []))
             )
             if task and has_bundle:
-                # 80% use standard pattern, 20% use helper rule (style guide)
-                use_helper = random.random() < 0.2
-                template = random.choice(InstructionGenerator.TASK_BUNDLE_TEMPLATES)
-                instruction = template.format(task_name=task_name)
-                if use_helper:
-                    rego_code = RegoCodeGenerator.generate_task_bundle_with_helper(task_name)
+                bundle_value = ref.get("bundle")
+                if not bundle_value and isinstance(ref.get("params"), list):
+                    bundle_param = next((p for p in ref.get("params", []) if p.get("name") == "bundle"), None)
+                    bundle_value = bundle_param.get("value") if bundle_param else None
+                
+                # 50% retrieval queries, 50% validation queries (with value check)
+                # Increased to 50% to generate more instruction variations
+                if bundle_value and random.random() < 0.5:
+                    # Generate validation queries - multiple instruction variations for same code
+                    # This teaches the model that different phrasings = same output
+                    num_variations = random.randint(3, 5)  # Generate 3-5 variations per bundle (increased from 2-4)
+                    for _ in range(num_variations):
+                        template = random.choice(InstructionGenerator.TASK_BUNDLE_CHECK_TEMPLATES)
+                        instruction = template.format(task_name=task_name, bundle_value=bundle_value)
+                        rego_code = RegoCodeGenerator.generate_check_task_bundle_value(task_name, bundle_value)
+                        examples.append((instruction, rego_code, {"task_name": task_name, "bundle_value": bundle_value, "query_type": "validation"}))
                 else:
-                    rego_code = RegoCodeGenerator.generate_get_task_bundle(task_name)
-                examples.append((instruction, rego_code, {"task_name": task_name}))
+                    # Generate retrieval queries
+                    # 80% use standard pattern, 20% use helper rule (style guide)
+                    use_helper = random.random() < 0.2
+                    template = random.choice(InstructionGenerator.TASK_BUNDLE_TEMPLATES)
+                    instruction = template.format(task_name=task_name)
+                    if use_helper:
+                        rego_code = RegoCodeGenerator.generate_task_bundle_with_helper(task_name)
+                    else:
+                        rego_code = RegoCodeGenerator.generate_get_task_bundle(task_name)
+                    examples.append((instruction, rego_code, {"task_name": task_name, "query_type": "retrieval"}))
         
         # List all task names (once per attestation)
         if task_names:
@@ -898,13 +1063,24 @@ class InstructionGenerator:
             examples.append((instruction, rego_code, {}))
             
             # Subject by digest lookup (for first few subjects with digests)
-            for subject in subjects[:2]:  # Limit to first 2 to avoid too many
+            for subject in subjects[:4]:  # Limit to first 4 (increased from 2 to allow more validation variations)
                 digest = subject.get("digest", {}).get("sha256")
                 if digest:
-                    template = random.choice(InstructionGenerator.SUBJECT_BY_DIGEST_TEMPLATES)
-                    instruction = template.format(digest=digest)
-                    rego_code = RegoCodeGenerator.generate_find_subject_by_digest(digest)
-                    examples.append((instruction, rego_code, {"digest": digest}))
+                    # 50% retrieval queries, 50% validation queries (with value check)
+                    if random.random() < 0.5:
+                        # Generate validation queries - multiple instruction variations for same code
+                        num_variations = random.randint(3, 5)  # Generate 3-5 variations per digest
+                        for _ in range(num_variations):
+                            template = random.choice(InstructionGenerator.SUBJECT_DIGEST_CHECK_TEMPLATES)
+                            instruction = template.format(digest=digest)
+                            rego_code = RegoCodeGenerator.generate_check_subject_digest_value(digest)
+                            examples.append((instruction, rego_code, {"digest": digest, "query_type": "validation"}))
+                    else:
+                        # Generate retrieval queries
+                        template = random.choice(InstructionGenerator.SUBJECT_BY_DIGEST_TEMPLATES)
+                        instruction = template.format(digest=digest)
+                        rego_code = RegoCodeGenerator.generate_find_subject_by_digest(digest)
+                        examples.append((instruction, rego_code, {"digest": digest, "query_type": "retrieval"}))
         
         return examples
     
@@ -928,16 +1104,38 @@ class InstructionGenerator:
             if uri:
                 # Material with URI and commit (if available)
                 if commit:
-                    template = random.choice(InstructionGenerator.MATERIAL_TEMPLATES)
-                    instruction = template.format(uri=uri, commit=commit)
-                    rego_code = RegoCodeGenerator.generate_check_material(uri, commit)
-                    examples.append((instruction, rego_code, {"uri": uri, "commit": commit}))
-                
-                # Material with URI only (add this for more diversity)
-                template = random.choice(InstructionGenerator.MATERIAL_URI_ONLY_TEMPLATES)
-                instruction = template.format(uri=uri)
-                rego_code = RegoCodeGenerator.generate_check_material(uri, None)
-                examples.append((instruction, rego_code, {"uri": uri}))
+                    # 50% retrieval queries, 50% validation queries (with value check)
+                    if random.random() < 0.5:
+                        # Generate validation queries - multiple instruction variations for same code
+                        num_variations = random.randint(3, 5)  # Generate 3-5 variations per material
+                        for _ in range(num_variations):
+                            template = random.choice(InstructionGenerator.MATERIAL_CHECK_TEMPLATES)
+                            instruction = template.format(uri=uri, commit=commit)
+                            rego_code = RegoCodeGenerator.generate_check_material_value(uri, commit)
+                            examples.append((instruction, rego_code, {"uri": uri, "commit": commit, "query_type": "validation"}))
+                    else:
+                        # Generate retrieval queries
+                        template = random.choice(InstructionGenerator.MATERIAL_TEMPLATES)
+                        instruction = template.format(uri=uri, commit=commit)
+                        rego_code = RegoCodeGenerator.generate_check_material(uri, commit)
+                        examples.append((instruction, rego_code, {"uri": uri, "commit": commit, "query_type": "retrieval"}))
+                else:
+                    # Material with URI only
+                    # 50% retrieval queries, 50% validation queries (with value check)
+                    if random.random() < 0.5:
+                        # Generate validation queries - multiple instruction variations for same code
+                        num_variations = random.randint(3, 5)  # Generate 3-5 variations per material
+                        for _ in range(num_variations):
+                            template = random.choice(InstructionGenerator.MATERIAL_URI_CHECK_TEMPLATES)
+                            instruction = template.format(uri=uri)
+                            rego_code = RegoCodeGenerator.generate_check_material_value(uri)
+                            examples.append((instruction, rego_code, {"uri": uri, "query_type": "validation"}))
+                    else:
+                        # Generate retrieval queries
+                        template = random.choice(InstructionGenerator.MATERIAL_URI_ONLY_TEMPLATES)
+                        instruction = template.format(uri=uri)
+                        rego_code = RegoCodeGenerator.generate_check_material(uri, None)
+                        examples.append((instruction, rego_code, {"uri": uri, "query_type": "retrieval"}))
         
         return examples
 
@@ -1204,9 +1402,9 @@ Examples:
         
         # Generate task-related examples (limit to avoid too many per file)
         task_examples = InstructionGenerator.generate_task_instructions(tasks)
-        # Limit to max 20 task examples per file (increased from 15 for more coverage)
-        if len(task_examples) > 20:
-            task_examples = random.sample(task_examples, 20)
+        # Limit to max 30 task examples per file (increased from 20 to allow more validation variations)
+        if len(task_examples) > 30:
+            task_examples = random.sample(task_examples, 30)
         
         for instruction, rego_code, metadata in task_examples:
             # Primary validation: Rego syntax (must pass)
@@ -1235,7 +1433,7 @@ Examples:
                 all_examples.append(example)
         
         # Generate material-related examples (limit to avoid too many)
-        material_examples = InstructionGenerator.generate_material_instructions(materials[:5])  # Limit to first 5 (increased from 3)
+        material_examples = InstructionGenerator.generate_material_instructions(materials[:8])  # Limit to first 8 (increased from 5 to allow more validation variations)
         for instruction, rego_code, metadata in material_examples:
             if not validate_rego_syntax(rego_code):
                 continue
