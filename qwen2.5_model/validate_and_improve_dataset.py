@@ -352,8 +352,22 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
             )
             
             if is_valid:
-                if attempt > 0 and logger:
-                    logger.info(f"LLM corrected code after {attempt + 1} attempt(s)")
+                if logger:
+                    if attempt > 0:
+                        logger.info(f"LLM corrected code after {attempt + 1} attempt(s)")
+                    # Print before/after comparison
+                    original_code = example.get('output_code', '')
+                    logger.info("=" * 80)
+                    logger.info("CODE IMPROVEMENT - BEFORE:")
+                    logger.info("-" * 80)
+                    for i, line in enumerate(original_code.split('\n'), 1):
+                        logger.info(f"{i:4d} | {line}")
+                    logger.info("-" * 80)
+                    logger.info("CODE IMPROVEMENT - AFTER:")
+                    logger.info("-" * 80)
+                    for i, line in enumerate(improved_code.split('\n'), 1):
+                        logger.info(f"{i:4d} | {line}")
+                    logger.info("=" * 80)
                 return improved_code
             
             # Code failed validation - feed error back to LLM
