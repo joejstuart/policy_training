@@ -56,7 +56,7 @@ except ImportError:
                 temp_file = f.name
             
             result = subprocess.run(
-                ['opa', 'parse', temp_file],
+                ['./opa', 'parse', temp_file],
                 capture_output=True,
                 text=True,
                 timeout=5
@@ -82,90 +82,76 @@ class ValidationResult:
     style_guide_violations: List[str] = None
 
 
-def check_style_guide_compliance(code: str, logger=None) -> List[str]:
-    """Check if code follows Rego style guide using OPA Regal linter."""
-    violations = []
+def validate_with_regal(code: str) -> Tuple[bool, List[str]]:
+    """
+    Run Regal linter on the given Rego code.
     
-    # Check if Regal is available
-    try:
-        result = subprocess.run(
-            ['regal', '--version'],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        if result.returncode != 0:
-            if logger:
-                logger.warning("Regal not found or not working. Falling back to basic checks.")
-            return _fallback_style_checks(code)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        if logger:
-            logger.warning("Regal not found. Install with: go install github.com/styrainc/regal/cmd/regal@latest")
-            logger.warning("Falling back to basic style checks.")
-        return _fallback_style_checks(code)
-    
-    # Use Regal to lint the code
+    Returns (ok, issues), where:
+      - ok = True if no errors (warnings are allowed)
+      - issues = list of human-readable messages
+    """
     try:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.rego', delete=False, encoding='utf-8') as f:
             f.write(code)
             temp_file = f.name
         
-        # Run Regal lint
+        # Basic regal invocation; adjust flags/config paths as needed
         result = subprocess.run(
-            ['regal', 'lint', temp_file, '--format', 'json'],
+            ['./regal', 'lint', temp_file],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
         )
         
-        # Clean up temp file
-        Path(temp_file).unlink()
+        Path(temp_file).unlink(missing_ok=True)
         
         if result.returncode == 0:
-            # No violations
-            return []
+            # No findings
+            return True, []
         
-        # Parse Regal JSON output
+        # Regal prints findings to stdout; stderr is more for fatal errors
+        output = result.stdout.strip() or result.stderr.strip()
+        if not output:
+            return False, ['regal lint failed with no output']
+        
+        # Parse output - Regal can output in different formats
+        # Try JSON first, fall back to text
+        issues = []
         try:
-            regal_output = json.loads(result.stdout)
+            # Try JSON format
+            regal_output = json.loads(output)
             if 'violations' in regal_output:
                 for violation in regal_output['violations']:
-                    # Format: "rule_name: description (location)"
                     rule_name = violation.get('title', 'Unknown rule')
                     description = violation.get('description', '')
                     location = violation.get('location', {})
                     line = location.get('row', '?')
                     col = location.get('col', '?')
-                    
-                    violation_msg = f"{rule_name}: {description} (line {line}, col {col})"
-                    violations.append(violation_msg)
-        except (json.JSONDecodeError, KeyError) as e:
-            # If JSON parsing fails, try to extract from stderr/stdout
-            if logger:
-                logger.warning(f"Failed to parse Regal output: {e}")
-            # Fallback: return stderr if available
-            if result.stderr:
-                violations.append(f"Regal lint error: {result.stderr.strip()}")
-            elif result.stdout:
-                # Try to extract violations from text output
-                for line in result.stdout.split('\n'):
-                    if line.strip() and not line.startswith('#'):
-                        violations.append(line.strip())
+                    issues.append(f"{rule_name}: {description} (line {line}, col {col})")
+            elif 'summary' in regal_output:
+                # Alternative JSON format
+                for finding in regal_output.get('findings', []):
+                    issues.append(finding.get('message', str(finding)))
+        except (json.JSONDecodeError, KeyError):
+            # Fall back to text parsing
+            for line in output.splitlines():
+                if line.strip() and not line.startswith('#'):
+                    issues.append(line.strip())
         
-        return violations
+        return False, issues if issues else ['regal lint reported issues (unable to parse output)']
         
+    except FileNotFoundError:
+        # regal not installed; treat as no-op
+        return True, []
     except Exception as e:
-        if logger:
-            logger.warning(f"Error running Regal: {e}")
-        return _fallback_style_checks(code)
+        return False, [f'regal lint error: {e}']
 
 
-def _fallback_style_checks(code: str) -> List[str]:
-    """Fallback style checks if Regal is not available."""
+def check_style_guide_compliance(code: str, logger=None) -> List[str]:
+    """Check custom style guide patterns (complements Regal)."""
     violations = []
     
-    # Basic checks that don't require Regal
-    # Check for proper package and import (these are handled by check_attestation_parsing)
+    # Custom checks that complement Regal
     # Check for 'every' usage (should be used for FOR ALL)
     if 'not some' in code and 'every' not in code:
         # Check if it's a FOR ALL pattern
@@ -244,7 +230,7 @@ ISSUES FOUND:
         prompt += "\n".join(f"- {issue}" for issue in issues)
     
     if style_violations:
-        prompt += "\n\nSTYLE GUIDE VIOLATIONS:"
+        prompt += "\n\nSTYLE / LINT FINDINGS (from Regal and custom checks):"
         prompt += "\n".join(f"- {violation}" for violation in style_violations)
     
     prompt += """
@@ -319,12 +305,21 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
 def validate_example(example: Dict, tokenizer=None, model=None, device=None, use_llm: bool = False, logger=None) -> ValidationResult:
     """Validate a single training example.
     
+    Uses 3-layer validation:
+    1. Syntax (opa parse) → hard error
+    2. Structure / attestation parsing → hard error
+    3. Regal + custom style checks → style violations (soft errors)
+    
     Note: Style violations are treated as warnings, not hard failures.
     An example is valid if it has no syntax errors or parsing issues.
     """
-    issues = []
-    style_violations = []
-    improved_code = None
+    if logger is None:
+        import logging
+        logger = logging.getLogger("validate_example")
+    
+    issues: List[str] = []
+    style_violations: List[str] = []
+    improved_code: Optional[str] = None
     
     # Extract output code
     output_code = example.get('output_code', '')
@@ -336,32 +331,56 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
             style_guide_violations=[]
         )
     
-    # 1. Validate Rego syntax (hard requirement)
-    is_valid, error_msg = validate_rego_code(output_code)
-    if not is_valid:
+    # 1. Syntax validation (hard requirement)
+    is_valid_syntax, error_msg = validate_rego_code(output_code)
+    if not is_valid_syntax:
         issues.append(f"Rego syntax error: {error_msg}")
     
-    # 2. Check style guide compliance using Regal (warnings only)
-    style_violations = check_style_guide_compliance(output_code, logger)
-    
-    # 3. Check attestation parsing (hard requirements)
+    # 2. Structural / attestation checks (hard requirements)
     parsing_issues = check_attestation_parsing(output_code, example.get('instruction', ''))
     issues.extend(parsing_issues)
     
-    # 4. Try to improve if there are issues and LLM is available
-    improvements = []
-    if (issues or style_violations) and use_llm and tokenizer and model:
-        improved_code = improve_example_with_llm(example, issues, style_violations, tokenizer, model, device, logger)
-        if improved_code:
-            improvements.append("Code improved using LLM")
-            # Re-validate improved code
-            is_valid_improved, _ = validate_rego_code(improved_code)
-            if is_valid_improved:
-                issues = []  # Clear issues if improved code is valid
-                style_violations = check_style_guide_compliance(improved_code, logger)
+    # 3. Regal lint (style + best practices)
+    regal_ok, regal_issues = validate_with_regal(output_code)
+    if not regal_ok and regal_issues:
+        style_violations.extend([f"Regal: {msg}" for msg in regal_issues])
     
-    # Style violations are warnings, not hard failures
-    # An example is valid if it has no syntax/parsing issues, even with style warnings
+    # 4. Custom style checks (complements Regal)
+    custom_style_issues = check_style_guide_compliance(output_code, logger)
+    style_violations.extend(custom_style_issues)
+    
+    improvements: List[str] = []
+    
+    # 5. Use LLM only if something is off
+    if (issues or style_violations) and use_llm and tokenizer and model:
+        improved = improve_example_with_llm(
+            example,
+            issues,
+            style_violations,
+            tokenizer,
+            model,
+            device,
+            logger=logger
+        )
+        if improved:
+            improved_code = improved
+            improvements.append("Code improved using LLM")
+            
+            # Re-run validation on improved code
+            is_valid_syntax_improved, _ = validate_rego_code(improved_code)
+            if not is_valid_syntax_improved:
+                logger.warning("Improved code is syntactically invalid; keeping original")
+                improved_code = None
+            else:
+                # Recompute checks on improved code
+                issues = check_attestation_parsing(improved_code, example.get('instruction', ''))
+                regal_ok, regal_issues = validate_with_regal(improved_code)
+                style_violations = []
+                if not regal_ok and regal_issues:
+                    style_violations.extend([f"Regal: {msg}" for msg in regal_issues])
+                style_violations.extend(check_style_guide_compliance(improved_code, logger))
+    
+    # Treat only structural/syntax issues as "invalid"
     is_valid = len(issues) == 0
     
     return ValidationResult(
