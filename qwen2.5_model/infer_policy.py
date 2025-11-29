@@ -75,7 +75,7 @@ QWEN_SYSTEM_PROMPT_ATTESTATION = (
     "- Use snake_case for all variable and rule names\n"
     "- Always include 'package attestation_check' and 'import rego.v1'\n\n"
     "Generate valid Rego code that correctly navigates attestation structures "
-    "(input.attestations -> statement -> predicate -> buildConfig.tasks, etc.)."
+    # "(input.attestations -> statement -> predicate -> buildConfig.tasks, etc.)."
 )
 
 # Condensed Rego style guide for attestation parsing (~310 tokens)
