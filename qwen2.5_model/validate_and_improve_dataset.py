@@ -122,21 +122,53 @@ def validate_with_regal(code: str) -> Tuple[bool, List[str]]:
             regal_output = json.loads(output)
             if 'violations' in regal_output:
                 for violation in regal_output['violations']:
-                    rule_name = violation.get('title', 'Unknown rule')
+                    # Extract rule ID (category/rule-name) from rule, title, or category+rule fields
+                    rule_id = violation.get('rule')
+                    if not rule_id:
+                        # Try to construct from category and rule name
+                        category = violation.get('category', '')
+                        rule_name = violation.get('title', violation.get('rule_name', ''))
+                        if category and rule_name:
+                            rule_id = f"{category}/{rule_name}"
+                        else:
+                            rule_id = violation.get('title', 'Unknown rule')
+                    
                     description = violation.get('description', '')
                     location = violation.get('location', {})
-                    line = location.get('row', '?')
-                    col = location.get('col', '?')
-                    issues.append(f"{rule_name}: {description} (line {line}, col {col})")
+                    line = location.get('row', location.get('line', '?'))
+                    col = location.get('col', location.get('column', '?'))
+                    # Format: "rule_id: description (line X, col Y)" for easy parsing
+                    issues.append(f"{rule_id}: {description} (line {line}, col {col})")
             elif 'summary' in regal_output:
                 # Alternative JSON format
                 for finding in regal_output.get('findings', []):
                     issues.append(finding.get('message', str(finding)))
         except (json.JSONDecodeError, KeyError):
             # Fall back to text parsing
+            # Regal text format may have structured output with "Rule:", "Description:", etc.
+            current_violation = {}
             for line in output.splitlines():
-                if line.strip() and not line.startswith('#'):
-                    issues.append(line.strip())
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                # Check for structured format
+                if line.startswith('Rule:'):
+                    if current_violation:
+                        # Save previous violation
+                        rule_id = current_violation.get('rule', 'Unknown rule')
+                        desc = current_violation.get('description', '')
+                        issues.append(f"{rule_id}: {desc}")
+                    current_violation = {'rule': line.replace('Rule:', '').strip()}
+                elif line.startswith('Description:'):
+                    current_violation['description'] = line.replace('Description:', '').strip()
+                elif ':' in line and not current_violation:
+                    # Simple format: "rule_id: description"
+                    issues.append(line)
+            # Add last violation if any
+            if current_violation:
+                rule_id = current_violation.get('rule', 'Unknown rule')
+                desc = current_violation.get('description', '')
+                issues.append(f"{rule_id}: {desc}")
         
         return False, issues if issues else ['regal lint reported issues (unable to parse output)']
         
@@ -159,6 +191,48 @@ def check_style_guide_compliance(code: str, logger=None) -> List[str]:
             violations.append("Consider using 'every' instead of 'not some' for FOR ALL queries")
     
     return violations
+
+
+def _run_opa_fmt(code: str, logger=None) -> Optional[str]:
+    """Run opa fmt on code to auto-format it.
+    
+    Returns the formatted code, or None if formatting fails.
+    """
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.rego', delete=False, encoding='utf-8') as f:
+            f.write(code)
+            temp_file = f.name
+        
+        # Run opa fmt
+        result = subprocess.run(
+            ['./opa', 'fmt', temp_file],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            # Read the formatted file
+            formatted_code = Path(temp_file).read_text(encoding='utf-8')
+            Path(temp_file).unlink(missing_ok=True)
+            return formatted_code
+        else:
+            if logger:
+                logger.warning(f"opa fmt failed: {result.stderr}")
+            Path(temp_file).unlink(missing_ok=True)
+            return None
+    except FileNotFoundError:
+        if logger:
+            logger.warning("opa command not found - cannot auto-format")
+        return None
+    except Exception as e:
+        if logger:
+            logger.warning(f"Error running opa fmt: {e}")
+        try:
+            Path(temp_file).unlink(missing_ok=True)
+        except:
+            pass
+        return None
 
 
 def _format_validation_error(error_msg: str) -> str:
@@ -256,6 +330,60 @@ def check_attestation_parsing(code: str, instruction: str) -> List[str]:
     return issues
 
 
+def _load_regal_rules_reference() -> Dict[str, str]:
+    """Load Regal rules reference from markdown file.
+    
+    Returns a dictionary mapping rule IDs (e.g., 'style/prefer-snake-case') to their descriptions.
+    """
+    rules_ref_path = Path(__file__).parent / "REGAL_RULES_REFERENCE.md"
+    rules_dict = {}
+    
+    try:
+        if rules_ref_path.exists():
+            content = rules_ref_path.read_text(encoding='utf-8')
+            # Parse markdown to extract rule IDs and descriptions
+            # Look for patterns like: ### `style/prefer-snake-case`
+            import re
+            pattern = r'### `([^`]+)`\s*\n\*\*Summary\*\*: (.+?)(?=\n\n|\n### |$)'
+            matches = re.findall(pattern, content, re.DOTALL)
+            for rule_id, summary in matches:
+                # Extract full description (summary + any additional text)
+                rule_section = re.search(
+                    rf'### `{re.escape(rule_id)}`\s*\n\*\*Summary\*\*: (.+?)(?=\n\n### |$)',
+                    content,
+                    re.DOTALL
+                )
+                if rule_section:
+                    description = rule_section.group(1).strip()
+                    # Clean up markdown formatting
+                    description = re.sub(r'\*\*([^*]+)\*\*', r'\1', description)
+                    rules_dict[rule_id] = description
+    except Exception as e:
+        # If we can't load the reference, continue without it
+        pass
+    
+    return rules_dict
+
+
+def _extract_regal_rule_ids(style_violations: List[str]) -> List[str]:
+    """Extract Regal rule IDs from violation messages.
+    
+    Regal violations are formatted as: "Regal: {rule_name}: {description} (line X, col Y)"
+    or just "{rule_name}: {description}"
+    """
+    rule_ids = []
+    for violation in style_violations:
+        # Remove "Regal: " prefix if present
+        msg = violation.replace("Regal: ", "").strip()
+        # Extract rule ID (format: "category/rule-name: description")
+        if ":" in msg:
+            rule_id = msg.split(":")[0].strip()
+            # Rule IDs are in format "category/rule-name"
+            if "/" in rule_id:
+                rule_ids.append(rule_id)
+    return list(set(rule_ids))  # Remove duplicates
+
+
 def create_improvement_prompt(example: Dict, issues: List[str], style_violations: List[str]) -> str:
     """Create a prompt for LLM to improve the example."""
     prompt = f"""You are reviewing a training example for Rego attestation parsing. Please improve the output_code to fix the following issues:
@@ -286,21 +414,31 @@ ISSUES FOUND:
     if style_violations:
         prompt += "\n\nSTYLE / LINT FINDINGS (from Regal and custom checks):"
         prompt += "\n".join(f"- {violation}" for violation in style_violations)
+        
+        # Load Regal rules reference and include relevant rule details
+        regal_rules = _load_regal_rules_reference()
+        rule_ids = _extract_regal_rule_ids(style_violations)
+        
+        if rule_ids and regal_rules:
+            prompt += "\n\nRELEVANT REGAL RULE DETAILS:"
+            for rule_id in rule_ids:
+                if rule_id in regal_rules:
+                    prompt += f"\n\n**{rule_id}**:\n{regal_rules[rule_id]}"
     
     prompt += """
 
-REGO STYLE GUIDE REQUIREMENTS:
-1. Use 'in' for membership checks when checking multiple values
-2. Use 'every' for FOR ALL queries (e.g., 'all tasks succeeded')
-3. Use 'some ... in' for iteration (declarative pattern)
-4. Prefer sets over arrays when order doesn't matter
-5. Use unconditional assignment in rule head when possible
-6. Use snake_case for all variable and rule names
-7. Always include 'package attestation_check' and 'import rego.v1'
+REGO STYLE GUIDE REQUIREMENTS (Key Takeaways):
+1. Use 'if' keyword in rule bodies (idiomatic/use-if)
+2. Use 'in' operator for membership checks (idiomatic/use-in-operator)
+3. Use 'some ... in' for iteration (style/prefer-some-in-iteration)
+4. Use snake_case for all names (style/prefer-snake-case)
+5. Prefer := over = for assignment (style/use-assignment-operator)
+6. Always include 'package attestation_check' and 'import rego.v1'
+7. Format code properly (style/opa-fmt)
 
 Please provide the improved Rego code that:
 - Fixes all the issues listed above
-- Follows the Rego style guide
+- Follows the Regal rules and Rego style guide
 - Correctly parses the attestation structure shown in the context
 - Matches the instruction requirements
 
@@ -538,16 +676,57 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
     parsing_issues = check_attestation_parsing(output_code, example.get('instruction', ''))
     issues.extend(parsing_issues)
     
+    improvements: List[str] = []
+    
     # 3. Regal lint (style + best practices)
     regal_ok, regal_issues = validate_with_regal(output_code)
     if not regal_ok and regal_issues:
-        style_violations.extend([f"Regal: {msg}" for msg in regal_issues])
+        # Filter out directory-package-mismatch (not relevant for training data)
+        # Check for opa-fmt violations to auto-fix
+        opa_fmt_needed = False
+        filtered_issues = []
+        
+        for msg in regal_issues:
+            # Check if this is a directory-package-mismatch violation
+            if 'directory-package-mismatch' in msg.lower():
+                if logger:
+                    logger.debug(f"Ignoring directory-package-mismatch violation: {msg}")
+                continue
+            
+            # Check if this is an opa-fmt violation
+            if 'opa-fmt' in msg.lower() or 'opa fmt' in msg.lower() or 'style/opa-fmt' in msg.lower():
+                opa_fmt_needed = True
+                if logger:
+                    logger.info("Detected opa-fmt violation - will auto-format code")
+                continue  # Don't add to violations, we'll fix it automatically
+            
+            filtered_issues.append(f"Regal: {msg}")
+        
+        style_violations.extend(filtered_issues)
+        
+        # Auto-fix opa-fmt violations
+        if opa_fmt_needed:
+            formatted_code = _run_opa_fmt(output_code, logger)
+            if formatted_code and formatted_code != output_code:
+                # Use formatted code as improvement
+                improved_code = formatted_code
+                improvements.append("Code auto-formatted with opa fmt")
+                if logger:
+                    logger.info("Code automatically formatted with opa fmt")
+                # Re-validate formatted code
+                output_code = formatted_code
+                # Re-run Regal on formatted code to get updated violations
+                regal_ok, regal_issues = validate_with_regal(output_code)
+                style_violations = []
+                if not regal_ok and regal_issues:
+                    # Filter again (might have new violations after formatting)
+                    for msg in regal_issues:
+                        if 'directory-package-mismatch' not in msg.lower() and 'opa-fmt' not in msg.lower() and 'opa fmt' not in msg.lower():
+                            style_violations.append(f"Regal: {msg}")
     
     # 4. Custom style checks (complements Regal)
     custom_style_issues = check_style_guide_compliance(output_code, logger)
     style_violations.extend(custom_style_issues)
-    
-    improvements: List[str] = []
     
     # 5. Use LLM if there are issues or style violations to fix
     if (issues or style_violations) and use_llm and tokenizer and model:
