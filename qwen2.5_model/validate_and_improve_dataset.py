@@ -373,6 +373,41 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
                 improved_code = formatted_code
             
             if is_valid:
+                # Check if improved code has meaningful content (not just package/imports)
+                # Remove package and import lines to check for actual rules/content
+                code_lines = improved_code.split('\n')
+                meaningful_lines = [
+                    line for line in code_lines
+                    if line.strip()
+                    and not line.strip().startswith('package ')
+                    and not line.strip().startswith('import ')
+                ]
+                
+                if not meaningful_lines:
+                    # Code only has package/imports, no actual rules - reject it
+                    if logger:
+                        logger.warning("LLM returned code with only package/imports (no rules). Rejecting improvement.")
+                        logger.warning(f"Raw response was: {response[:500]}")
+                    # Continue to next attempt or return None
+                    if attempt < max_corrections - 1:
+                        # Try again with a more explicit prompt
+                        correction_prompt = f"""The generated code only contains package and import declarations, but no actual rules or logic.
+
+ORIGINAL CODE (what you should preserve):
+```rego
+{example.get('output_code', '')}
+```
+
+The code must include the actual rules/logic from the original code, not just package declarations.
+Please provide the complete Rego code with all rules preserved.
+
+Output only the complete Rego code, no explanations."""
+                        messages.append({"role": "assistant", "content": improved_code})
+                        messages.append({"role": "user", "content": correction_prompt})
+                        continue
+                    else:
+                        return None
+                
                 # Check if code actually changed
                 original_code = example.get('output_code', '').strip()
                 improved_code_stripped = improved_code.strip() if improved_code else ""
@@ -516,6 +551,18 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
     
     # 5. Use LLM if there are issues or style violations to fix
     if (issues or style_violations) and use_llm and tokenizer and model:
+        # Log what triggered the LLM
+        if logger:
+            logger.info("Triggering LLM improvement due to:")
+            if issues:
+                logger.info("  Hard errors:")
+                for issue in issues:
+                    logger.info(f"    - {issue}")
+            if style_violations:
+                logger.info("  Style violations:")
+                for violation in style_violations:
+                    logger.info(f"    - {violation}")
+        
         improved = improve_example_with_llm(
             example,
             issues,
