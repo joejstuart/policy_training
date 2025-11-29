@@ -504,7 +504,7 @@ def generate_response(tokenizer, model, device, messages, max_tokens=512, temper
     return response
 
 
-def interactive_chat(tokenizer, model, device, builder=None, default_package=None, validate=True, max_corrections=3, include_style_guide=False):
+def interactive_chat(tokenizer, model, device, builder=None, default_package=None, validate=True, max_corrections=3, include_style_guide=False, enhance_instruction=True):
     """Run interactive chat mode with dynamic context building.
     
     Args:
@@ -590,8 +590,11 @@ def interactive_chat(tokenizer, model, device, builder=None, default_package=Non
                 except Exception as e:
                     print(f"⚠ Warning: Failed to build context: {e}")
             
-            # Enhance instruction to emphasize specific requirements
-            enhanced_instruction = enhance_instruction_with_emphasis(instruction)
+            # Enhance instruction to emphasize specific requirements (if enabled)
+            if enhance_instruction:
+                enhanced_instruction = enhance_instruction_with_emphasis(instruction)
+            else:
+                enhanced_instruction = instruction
             
             # Combine context parts
             if context_parts:
@@ -648,7 +651,7 @@ def interactive_chat(tokenizer, model, device, builder=None, default_package=Non
 def single_inference(
     tokenizer, model, device, instruction, 
     context=None, builder=None, package=None, max_tokens=1024,
-    validate=True, max_corrections=3, include_style_guide=False
+    validate=True, max_corrections=3, include_style_guide=False, enhance_instruction=True
 ):
     """Run a single inference with dynamic context building.
     
@@ -707,8 +710,11 @@ def single_inference(
         # Use provided static context
         context_parts.append(context)
     
-    # Enhance instruction to emphasize specific requirements
-    enhanced_instruction = enhance_instruction_with_emphasis(instruction)
+    # Enhance instruction to emphasize specific requirements (if enabled)
+    if enhance_instruction:
+        enhanced_instruction = enhance_instruction_with_emphasis(instruction)
+    else:
+        enhanced_instruction = instruction
     
     # Combine context parts
     if context_parts:
@@ -880,6 +886,11 @@ Examples (using base model only - for comparison):
         action="store_true",
         help="Include condensed Rego style guide in context (~310 tokens). Helps ensure style guide compliance.",
     )
+    parser.add_argument(
+        "--no-enhance-instruction",
+        action="store_true",
+        help="Disable instruction enhancement that emphasizes specific requirements (rule names, variable names, etc.).",
+    )
     
     args = parser.parse_args()
     
@@ -950,6 +961,7 @@ Examples (using base model only - for comparison):
             print()
     
     # Run inference
+    enhance_instruction = not args.no_enhance_instruction
     if args.instruction:
         # Single inference mode
         single_inference(
@@ -963,7 +975,8 @@ Examples (using base model only - for comparison):
             max_tokens=args.max_tokens,
             validate=not args.no_validate,
             max_corrections=args.max_corrections,
-            include_style_guide=args.include_style_guide
+            include_style_guide=args.include_style_guide,
+            enhance_instruction=enhance_instruction
         )
     else:
         # Interactive chat mode
@@ -975,7 +988,8 @@ Examples (using base model only - for comparison):
             default_package=args.package,
             validate=not args.no_validate,
             max_corrections=args.max_corrections,
-            include_style_guide=args.include_style_guide
+            include_style_guide=args.include_style_guide,
+            enhance_instruction=enhance_instruction
         )
 
 
