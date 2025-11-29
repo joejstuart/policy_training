@@ -262,7 +262,16 @@ def create_improvement_prompt(example: Dict, issues: List[str], style_violations
 
 INSTRUCTION:
 {example['instruction']}
-
+"""
+    
+    # Include context (attestation JSON structure) if available
+    if 'context' in example and example['context']:
+        prompt += f"""
+ATTESTATION CONTEXT (the JSON structure the code should parse):
+{example['context']}
+"""
+    
+    prompt += f"""
 CURRENT OUTPUT CODE:
 ```rego
 {example['output_code']}
@@ -292,7 +301,7 @@ REGO STYLE GUIDE REQUIREMENTS:
 Please provide the improved Rego code that:
 - Fixes all the issues listed above
 - Follows the Rego style guide
-- Correctly parses the attestation structure
+- Correctly parses the attestation structure shown in the context
 - Matches the instruction requirements
 
 Output only the improved Rego code, no explanations."""
@@ -356,9 +365,17 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
                 formatted_error = _format_validation_error(error_msg)
                 
                 # Create correction prompt with the validation error
-                correction_prompt = f"""The generated Rego code has syntax errors. Please fix them.
+                # Include context if available
+                context_section = ""
+                if 'context' in example and example['context']:
+                    context_section = f"""
+ATTESTATION CONTEXT (for reference):
+{example['context']}
 
-VALIDATION ERRORS:
+"""
+                
+                correction_prompt = f"""The generated Rego code has syntax errors. Please fix them.
+{context_section}VALIDATION ERRORS:
 {formatted_error}
 
 GENERATED CODE (with errors):
@@ -366,10 +383,14 @@ GENERATED CODE (with errors):
 {improved_code}
 ```
 
+ORIGINAL INSTRUCTION:
+{example.get('instruction', 'N/A')}
+
 Please provide the corrected Rego code that fixes these syntax errors. Ensure:
 - All rules have proper 'if' keywords before rule bodies
 - All syntax is valid Rego
 - The code still addresses the original instruction and issues
+- The code correctly parses the attestation structure shown in the context
 
 Output only the corrected Rego code, no explanations."""
                 
