@@ -95,9 +95,9 @@ def validate_with_regal(code: str) -> Tuple[bool, List[str]]:
             f.write(code)
             temp_file = f.name
         
-        # Basic regal invocation; adjust flags/config paths as needed
+        # Basic regal invocation with JSON output for easier parsing
         result = subprocess.run(
-            ['./regal', 'lint', temp_file],
+            ['./regal', 'lint', '--format', 'json', temp_file],
             capture_output=True,
             text=True,
             timeout=10,
@@ -147,28 +147,44 @@ def validate_with_regal(code: str) -> Tuple[bool, List[str]]:
             # Fall back to text parsing
             # Regal text format may have structured output with "Rule:", "Description:", etc.
             current_violation = {}
+            violation_lines = []
             for line in output.splitlines():
                 line = line.strip()
                 if not line or line.startswith('#'):
                     continue
-                # Check for structured format
-                if line.startswith('Rule:'):
+                
+                # Check for structured format (INFO: Rule:, INFO: Description:, etc.)
+                if 'Rule:' in line:
                     if current_violation:
                         # Save previous violation
                         rule_id = current_violation.get('rule', 'Unknown rule')
                         desc = current_violation.get('description', '')
-                        issues.append(f"{rule_id}: {desc}")
-                    current_violation = {'rule': line.replace('Rule:', '').strip()}
-                elif line.startswith('Description:'):
-                    current_violation['description'] = line.replace('Description:', '').strip()
-                elif ':' in line and not current_violation:
+                        location = current_violation.get('location', '')
+                        if location:
+                            issues.append(f"{rule_id}: {desc} ({location})")
+                        else:
+                            issues.append(f"{rule_id}: {desc}")
+                    # Extract rule name (may have "INFO:" prefix)
+                    rule_part = line.split('Rule:')[-1].strip()
+                    current_violation = {'rule': rule_part}
+                elif 'Description:' in line:
+                    desc_part = line.split('Description:')[-1].strip()
+                    current_violation['description'] = desc_part
+                elif 'Location:' in line:
+                    loc_part = line.split('Location:')[-1].strip()
+                    current_violation['location'] = loc_part
+                elif ':' in line and not any(key in line for key in ['Rule:', 'Description:', 'Location:', 'Category:', 'Text:', 'Documentation:']):
                     # Simple format: "rule_id: description"
                     issues.append(line)
             # Add last violation if any
             if current_violation:
                 rule_id = current_violation.get('rule', 'Unknown rule')
                 desc = current_violation.get('description', '')
-                issues.append(f"{rule_id}: {desc}")
+                location = current_violation.get('location', '')
+                if location:
+                    issues.append(f"{rule_id}: {desc} ({location})")
+                else:
+                    issues.append(f"{rule_id}: {desc}")
         
         return False, issues if issues else ['regal lint reported issues (unable to parse output)']
         
@@ -191,6 +207,40 @@ def check_style_guide_compliance(code: str, logger=None) -> List[str]:
             violations.append("Consider using 'every' instead of 'not some' for FOR ALL queries")
     
     return violations
+
+
+def _fix_line_length_violations(code: str, violations: List[Tuple[int, str]], logger=None) -> Optional[str]:
+    """Fix line-length violations by adding regal ignore comments.
+    
+    Args:
+        code: The Rego code to fix
+        violations: List of (line_number, message) tuples for line-length violations
+        logger: Optional logger
+    
+    Returns:
+        Fixed code with ignore comments added, or None if fixing fails
+    """
+    if not violations:
+        return code
+    
+    lines = code.split('\n')
+    # Sort violations by line number in reverse order to avoid offset issues
+    sorted_violations = sorted(violations, key=lambda x: x[0], reverse=True)
+    
+    for line_num, msg in sorted_violations:
+        # Convert 1-based line number to 0-based index
+        idx = line_num - 1
+        if 0 <= idx < len(lines):
+            # Check if ignore comment already exists above this line
+            if idx > 0 and '# regal ignore:line-length' in lines[idx - 1]:
+                continue  # Already has ignore comment
+            
+            # Insert ignore comment above the offending line
+            lines.insert(idx, '# regal ignore:line-length')
+            if logger:
+                logger.debug(f"Added ignore comment above line {line_num}")
+    
+    return '\n'.join(lines)
 
 
 def _run_opa_fmt(code: str, logger=None) -> Optional[str]:
@@ -682,8 +732,9 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
     regal_ok, regal_issues = validate_with_regal(output_code)
     if not regal_ok and regal_issues:
         # Filter out directory-package-mismatch (not relevant for training data)
-        # Check for opa-fmt violations to auto-fix
+        # Check for auto-fixable violations
         opa_fmt_needed = False
+        line_length_violations = []  # Store (line_number, message) tuples
         filtered_issues = []
         
         for msg in regal_issues:
@@ -700,9 +751,76 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
                     logger.info("Detected opa-fmt violation - will auto-format code")
                 continue  # Don't add to violations, we'll fix it automatically
             
+            # Check if this is a line-length violation
+            if 'line-length' in msg.lower() or 'style/line-length' in msg.lower():
+                # Extract line number from message (format: "rule_id: description (line X, col Y)")
+                line_num = None
+                try:
+                    # Try to extract line number from various formats
+                    if '(line' in msg:
+                        line_part = msg.split('(line')[1].split(',')[0].strip()
+                        line_num = int(line_part)
+                    elif 'line' in msg.lower() and any(char.isdigit() for char in msg):
+                        # Try regex to find line number
+                        import re
+                        line_match = re.search(r'line\s+(\d+)', msg, re.IGNORECASE)
+                        if line_match:
+                            line_num = int(line_match.group(1))
+                except (ValueError, IndexError):
+                    pass
+                
+                if line_num:
+                    line_length_violations.append((line_num, msg))
+                    if logger:
+                        logger.info(f"Detected line-length violation at line {line_num} - will add ignore comment")
+                else:
+                    # Can't extract line number, add to filtered issues
+                    filtered_issues.append(f"Regal: {msg}")
+                continue  # Don't add to violations, we'll fix it automatically
+            
             filtered_issues.append(f"Regal: {msg}")
         
         style_violations.extend(filtered_issues)
+        
+        # Auto-fix line-length violations first (before opa-fmt, as it may change line numbers)
+        if line_length_violations:
+            original_code_for_logging = output_code  # Save for logging
+            fixed_code = _fix_line_length_violations(output_code, line_length_violations, logger)
+            if fixed_code and fixed_code != output_code:
+                output_code = fixed_code
+                improved_code = fixed_code
+                improvements.append("Code auto-fixed: added regal ignore comments for line-length violations")
+                if logger:
+                    logger.info("=" * 80)
+                    logger.info("AUTO-FIX LINE-LENGTH VIOLATIONS")
+                    logger.info("=" * 80)
+                    logger.info(f"INSTRUCTION:")
+                    logger.info(f"  {example.get('instruction', 'N/A')}")
+                    logger.info("")
+                    logger.info("BEFORE CODE:")
+                    logger.info("-" * 80)
+                    for i, line in enumerate(original_code_for_logging.split('\n'), 1):
+                        logger.info(f"{i:4d} | {line}")
+                    logger.info("-" * 80)
+                    logger.info("")
+                    logger.info("ERRORS / WARNINGS:")
+                    for line_num, msg in line_length_violations:
+                        logger.info(f"  - {msg}")
+                    logger.info("")
+                    logger.info("AFTER CODE (with ignore comments):")
+                    logger.info("-" * 80)
+                    for i, line in enumerate(fixed_code.split('\n'), 1):
+                        logger.info(f"{i:4d} | {line}")
+                    logger.info("-" * 80)
+                    logger.info("=" * 80)
+                # Re-run Regal on fixed code to get updated violations
+                regal_ok, regal_issues = validate_with_regal(output_code)
+                # Update style_violations with remaining issues
+                style_violations = []
+                if not regal_ok and regal_issues:
+                    for msg in regal_issues:
+                        if 'directory-package-mismatch' not in msg.lower() and 'line-length' not in msg.lower():
+                            style_violations.append(f"Regal: {msg}")
         
         # Auto-fix opa-fmt violations
         if opa_fmt_needed:
@@ -712,7 +830,27 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
                 improved_code = formatted_code
                 improvements.append("Code auto-formatted with opa fmt")
                 if logger:
-                    logger.info("Code automatically formatted with opa fmt")
+                    logger.info("=" * 80)
+                    logger.info("AUTO-FORMAT WITH OPA FMT")
+                    logger.info("=" * 80)
+                    logger.info(f"INSTRUCTION:")
+                    logger.info(f"  {example.get('instruction', 'N/A')}")
+                    logger.info("")
+                    logger.info("BEFORE CODE:")
+                    logger.info("-" * 80)
+                    for i, line in enumerate(output_code.split('\n'), 1):
+                        logger.info(f"{i:4d} | {line}")
+                    logger.info("-" * 80)
+                    logger.info("")
+                    logger.info("ERRORS / WARNINGS:")
+                    logger.info("  - opa-fmt: File should be formatted with opa fmt")
+                    logger.info("")
+                    logger.info("AFTER CODE (auto-formatted):")
+                    logger.info("-" * 80)
+                    for i, line in enumerate(formatted_code.split('\n'), 1):
+                        logger.info(f"{i:4d} | {line}")
+                    logger.info("-" * 80)
+                    logger.info("=" * 80)
                 # Re-validate formatted code
                 output_code = formatted_code
                 # Re-run Regal on formatted code to get updated violations
@@ -730,17 +868,54 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
     
     # 5. Use LLM if there are issues or style violations to fix
     if (issues or style_violations) and use_llm and tokenizer and model:
-        # Log what triggered the LLM
+        # Log clear summary before LLM improvement
         if logger:
-            logger.info("Triggering LLM improvement due to:")
+            logger.info("=" * 80)
+            logger.info("LLM IMPROVEMENT REQUEST")
+            logger.info("=" * 80)
+            logger.info(f"INSTRUCTION:")
+            logger.info(f"  {example.get('instruction', 'N/A')}")
+            logger.info("")
+            logger.info("BEFORE CODE:")
+            logger.info("-" * 80)
+            for i, line in enumerate(output_code.split('\n'), 1):
+                logger.info(f"{i:4d} | {line}")
+            logger.info("-" * 80)
+            logger.info("")
+            logger.info("ERRORS / WARNINGS:")
             if issues:
-                logger.info("  Hard errors:")
+                logger.info("  Hard Errors:")
                 for issue in issues:
                     logger.info(f"    - {issue}")
             if style_violations:
-                logger.info("  Style violations:")
+                logger.info("  Style Violations:")
+                # Group violations by rule for better readability
+                violations_by_rule = {}
                 for violation in style_violations:
-                    logger.info(f"    - {violation}")
+                    # Extract rule ID from violation message
+                    # Format: "Regal: rule_id: description (location)" or just "Regal: ..."
+                    clean_violation = violation.replace("Regal: ", "").strip()
+                    # Try to extract rule ID (format: "category/rule-name: description")
+                    if ":" in clean_violation:
+                        parts = clean_violation.split(":", 1)
+                        rule_id = parts[0].strip()
+                        description = parts[1].strip() if len(parts) > 1 else ""
+                        if rule_id not in violations_by_rule:
+                            violations_by_rule[rule_id] = []
+                        violations_by_rule[rule_id].append(description)
+                    else:
+                        # Fallback: just show the violation
+                        logger.info(f"    - {clean_violation}")
+                
+                # Display grouped violations
+                for rule_id, descriptions in violations_by_rule.items():
+                    if len(descriptions) == 1:
+                        logger.info(f"    - {rule_id}: {descriptions[0]}")
+                    else:
+                        logger.info(f"    - {rule_id}:")
+                        for desc in descriptions:
+                            logger.info(f"        • {desc}")
+            logger.info("=" * 80)
         
         improved = improve_example_with_llm(
             example,
@@ -755,6 +930,16 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
         if improved:
             improved_code = improved
             improvements.append("Code improved using LLM")
+            
+            # Log after code
+            if logger:
+                logger.info("=" * 80)
+                logger.info("AFTER CODE:")
+                logger.info("-" * 80)
+                for i, line in enumerate(improved_code.split('\n'), 1):
+                    logger.info(f"{i:4d} | {line}")
+                logger.info("-" * 80)
+                logger.info("=" * 80)
             
             # Re-run validation on improved code
             is_valid_syntax_improved, _ = validate_rego_code(improved_code)
