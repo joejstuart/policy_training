@@ -116,15 +116,60 @@ def check_style_guide_compliance(code: str) -> List[str]:
     """Check if code follows Rego style guide patterns."""
     violations = []
     
+    # Known attestation JSON field names (camelCase is correct for these)
+    # These come from the attestation structure itself, not user-defined variables
+    attestation_fields = {
+        'buildConfig', 'finishedOn', 'startedOn', 'taskResults', 'predicateType',
+        'resolvedDependencies', 'buildDefinition', 'entryPoint', 'invocation',
+        'metadata', 'custom', 'shortName', 'failureMsg', 'pipelineIntention',
+        'collections', 'effectiveOn', 'ruleData', 'taskExpiry', 'warningDays'
+    }
+    
     # Check for membership checks that should use 'in'
     if re.search(r'status\s*==\s*["\']Succeeded["\']', code) and 'in {' not in code:
         # This is a warning, not always a violation
         pass
     
-    # Check for snake_case
-    camel_case_vars = re.findall(r'\b[a-z]+[A-Z]\w*\b', code)
-    if camel_case_vars:
-        violations.append(f"Found camelCase variables: {camel_case_vars}. Use snake_case instead.")
+    # Check for snake_case in user-defined variables
+    # Look for camelCase patterns, but exclude:
+    # 1. Field access patterns (e.g., task.buildConfig, att.statement.predicate)
+    # 2. Known attestation field names
+    # 3. String literals
+    
+    # Find all camelCase identifiers
+    camel_case_pattern = r'\b([a-z]+[A-Z]\w*)\b'
+    all_camel_case = re.findall(camel_case_pattern, code)
+    
+    # Filter out field access patterns (e.g., "task.buildConfig" or "att.statement.predicate")
+    # These are accessing JSON fields, not user-defined variables
+    user_vars = []
+    for match in all_camel_case:
+        # Check if it's part of a field access (has a dot before it)
+        # Pattern: word.fieldName or word.fieldName.fieldName2
+        field_access_pattern = rf'\w+\.{re.escape(match)}\b'
+        if re.search(field_access_pattern, code):
+            # This is a field access, check if it's a known attestation field
+            if match in attestation_fields:
+                continue  # Skip known attestation fields
+            # Could still be a field access, but be conservative
+            # Only flag if it's clearly a variable assignment
+            var_assignment_pattern = rf'\b{match}\s*:=\s*'
+            if not re.search(var_assignment_pattern, code):
+                continue  # Likely a field access, skip
+        
+        # Check if it's in a string literal
+        # This is approximate - full parsing would be better
+        if f'"{match}"' in code or f"'{match}'" in code:
+            continue  # It's a string literal
+        
+        # Check if it's a known attestation field used in a different context
+        if match in attestation_fields:
+            continue  # Known attestation field
+        
+        user_vars.append(match)
+    
+    if user_vars:
+        violations.append(f"Found camelCase variables: {user_vars}. Use snake_case instead.")
     
     # Check for 'every' usage (should be used for FOR ALL)
     if 'not some' in code and 'every' not in code:
