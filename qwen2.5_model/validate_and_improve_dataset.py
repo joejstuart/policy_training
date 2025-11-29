@@ -72,36 +72,6 @@ except ImportError:
             return False, code, str(e)
 
 
-# Rego style guide patterns to check
-STYLE_GUIDE_PATTERNS = {
-    "use_in_for_membership": {
-        "pattern": r'status\s*(==|!=)\s*["\']',
-        "preferred": "Use 'in' for membership checks when checking multiple values",
-        "example": "task.status in {\"Succeeded\", \"Failed\"}"
-    },
-    "use_every_for_all": {
-        "pattern": r'not\s+some\s+.*\s+in\s+.*\s+\{.*status\s*!=',
-        "preferred": "Use 'every' for FOR ALL queries",
-        "example": "every task in att.statement.predicate.buildConfig.tasks { task.status == \"Succeeded\" }"
-    },
-    "use_some_in": {
-        "pattern": r'for\s+.*\s+in\s+',
-        "preferred": "Use 'some ... in' for iteration (declarative pattern)",
-        "example": "some task in att.statement.predicate.buildConfig.tasks"
-    },
-    "snake_case": {
-        "pattern": r'[a-z]+[A-Z]',
-        "preferred": "Use snake_case for all variable and rule names",
-        "example": "task_name instead of taskName"
-    },
-    "unconditional_assignment": {
-        "pattern": r'(\w+)\s+if\s+\{\s*\1\s*:=\s*',
-        "preferred": "Use unconditional assignment in rule head when possible",
-        "example": "result := value if { ... } instead of result if { value := ... }"
-    }
-}
-
-
 @dataclass
 class ValidationResult:
     """Result of validating a training example."""
@@ -112,65 +82,90 @@ class ValidationResult:
     style_guide_violations: List[str] = None
 
 
-def check_style_guide_compliance(code: str) -> List[str]:
-    """Check if code follows Rego style guide patterns."""
+def check_style_guide_compliance(code: str, logger=None) -> List[str]:
+    """Check if code follows Rego style guide using OPA Regal linter."""
     violations = []
     
-    # Known attestation JSON field names (camelCase is correct for these)
-    # These come from the attestation structure itself, not user-defined variables
-    attestation_fields = {
-        'buildConfig', 'finishedOn', 'startedOn', 'taskResults', 'predicateType',
-        'resolvedDependencies', 'buildDefinition', 'entryPoint', 'invocation',
-        'metadata', 'custom', 'shortName', 'failureMsg', 'pipelineIntention',
-        'collections', 'effectiveOn', 'ruleData', 'taskExpiry', 'warningDays'
-    }
+    # Check if Regal is available
+    try:
+        result = subprocess.run(
+            ['regal', '--version'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode != 0:
+            if logger:
+                logger.warning("Regal not found or not working. Falling back to basic checks.")
+            return _fallback_style_checks(code)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        if logger:
+            logger.warning("Regal not found. Install with: go install github.com/styrainc/regal/cmd/regal@latest")
+            logger.warning("Falling back to basic style checks.")
+        return _fallback_style_checks(code)
     
-    # Check for membership checks that should use 'in'
-    if re.search(r'status\s*==\s*["\']Succeeded["\']', code) and 'in {' not in code:
-        # This is a warning, not always a violation
-        pass
-    
-    # Check for snake_case in user-defined variables
-    # Look for camelCase patterns, but exclude:
-    # 1. Field access patterns (e.g., task.buildConfig, att.statement.predicate)
-    # 2. Known attestation field names
-    # 3. String literals
-    
-    # Find all camelCase identifiers
-    camel_case_pattern = r'\b([a-z]+[A-Z]\w*)\b'
-    all_camel_case = re.findall(camel_case_pattern, code)
-    
-    # Filter out field access patterns (e.g., "task.buildConfig" or "att.statement.predicate")
-    # These are accessing JSON fields, not user-defined variables
-    user_vars = []
-    for match in all_camel_case:
-        # Check if it's part of a field access (has a dot before it)
-        # Pattern: word.fieldName or word.fieldName.fieldName2
-        field_access_pattern = rf'\w+\.{re.escape(match)}\b'
-        if re.search(field_access_pattern, code):
-            # This is a field access, check if it's a known attestation field
-            if match in attestation_fields:
-                continue  # Skip known attestation fields
-            # Could still be a field access, but be conservative
-            # Only flag if it's clearly a variable assignment
-            var_assignment_pattern = rf'\b{match}\s*:=\s*'
-            if not re.search(var_assignment_pattern, code):
-                continue  # Likely a field access, skip
+    # Use Regal to lint the code
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.rego', delete=False, encoding='utf-8') as f:
+            f.write(code)
+            temp_file = f.name
         
-        # Check if it's in a string literal
-        # This is approximate - full parsing would be better
-        if f'"{match}"' in code or f"'{match}'" in code:
-            continue  # It's a string literal
+        # Run Regal lint
+        result = subprocess.run(
+            ['regal', 'lint', temp_file, '--format', 'json'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
         
-        # Check if it's a known attestation field used in a different context
-        if match in attestation_fields:
-            continue  # Known attestation field
+        # Clean up temp file
+        Path(temp_file).unlink()
         
-        user_vars.append(match)
+        if result.returncode == 0:
+            # No violations
+            return []
+        
+        # Parse Regal JSON output
+        try:
+            regal_output = json.loads(result.stdout)
+            if 'violations' in regal_output:
+                for violation in regal_output['violations']:
+                    # Format: "rule_name: description (location)"
+                    rule_name = violation.get('title', 'Unknown rule')
+                    description = violation.get('description', '')
+                    location = violation.get('location', {})
+                    line = location.get('row', '?')
+                    col = location.get('col', '?')
+                    
+                    violation_msg = f"{rule_name}: {description} (line {line}, col {col})"
+                    violations.append(violation_msg)
+        except (json.JSONDecodeError, KeyError) as e:
+            # If JSON parsing fails, try to extract from stderr/stdout
+            if logger:
+                logger.warning(f"Failed to parse Regal output: {e}")
+            # Fallback: return stderr if available
+            if result.stderr:
+                violations.append(f"Regal lint error: {result.stderr.strip()}")
+            elif result.stdout:
+                # Try to extract violations from text output
+                for line in result.stdout.split('\n'):
+                    if line.strip() and not line.startswith('#'):
+                        violations.append(line.strip())
+        
+        return violations
+        
+    except Exception as e:
+        if logger:
+            logger.warning(f"Error running Regal: {e}")
+        return _fallback_style_checks(code)
+
+
+def _fallback_style_checks(code: str) -> List[str]:
+    """Fallback style checks if Regal is not available."""
+    violations = []
     
-    if user_vars:
-        violations.append(f"Found camelCase variables: {user_vars}. Use snake_case instead.")
-    
+    # Basic checks that don't require Regal
+    # Check for proper package and import (these are handled by check_attestation_parsing)
     # Check for 'every' usage (should be used for FOR ALL)
     if 'not some' in code and 'every' not in code:
         # Check if it's a FOR ALL pattern
@@ -197,22 +192,30 @@ def validate_rego_code(code: str) -> Tuple[bool, str]:
 def check_attestation_parsing(code: str, instruction: str) -> List[str]:
     """Check if code correctly parses attestation structure."""
     issues = []
+    instruction_lower = instruction.lower()
     
-    # Check for correct navigation paths
-    if 'task' in instruction.lower() and 'buildConfig.tasks' not in code:
-        issues.append("Instruction mentions 'task' but code doesn't access buildConfig.tasks")
+    # Check for correct navigation paths (more lenient - allow helpers)
+    if 'task' in instruction_lower:
+        # Check if code accesses tasks in any way (direct or via helpers)
+        if 'buildConfig.tasks' not in code and 'tasks' not in code and '.task' not in code:
+            issues.append("Instruction mentions 'task' but code doesn't appear to iterate tasks")
     
-    if 'material' in instruction.lower() and 'materials' not in code:
-        issues.append("Instruction mentions 'material' but code doesn't access materials")
+    if 'material' in instruction_lower:
+        # Check if code accesses materials
+        if 'materials' not in code and '.material' not in code:
+            issues.append("Instruction mentions 'material' but code doesn't appear to access materials")
     
-    if 'subject' in instruction.lower() and 'subject' not in code:
-        issues.append("Instruction mentions 'subject' but code doesn't access subject")
+    if 'subject' in instruction_lower:
+        # Check if code accesses subject
+        if 'subject' not in code and '.subject' not in code:
+            issues.append("Instruction mentions 'subject' but code doesn't appear to access subject")
     
-    # Check for proper array iteration
-    if 'some' not in code and 'every' not in code and 'input.attestations' in code:
-        issues.append("Code accesses attestations but doesn't iterate with 'some' or 'every'")
+    # Check for proper array iteration (only if accessing attestations directly)
+    if 'input.attestations' in code:
+        if 'some' not in code and 'every' not in code:
+            issues.append("Code accesses attestations but doesn't iterate with 'some' or 'every'")
     
-    # Check for proper package and import
+    # Check for proper package and import (hard requirements)
     if 'package attestation_check' not in code:
         issues.append("Missing 'package attestation_check'")
     
@@ -267,7 +270,7 @@ Output only the improved Rego code, no explanations."""
 
 
 def improve_example_with_llm(example: Dict, issues: List[str], style_violations: List[str], 
-                             tokenizer, model, device) -> Optional[str]:
+                             tokenizer, model, device, logger=None) -> Optional[str]:
     """Use LLM to improve the example."""
     prompt = create_improvement_prompt(example, issues, style_violations)
     
@@ -289,6 +292,11 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
         # Extract code from response
         improved_code = extract_rego_code(response)
         
+        if not improved_code:
+            if logger:
+                logger.warning("LLM improvement returned no code")
+            return None
+        
         # Validate the improved code
         is_valid, _, error_msg = validate_rego_syntax(
             improved_code,
@@ -299,13 +307,21 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
         if is_valid:
             return improved_code
         else:
+            if logger:
+                logger.warning(f"LLM improved code failed validation: {error_msg}")
             return None
     except Exception as e:
+        if logger:
+            log_exception(logger, e, context="LLM improvement failed")
         return None
 
 
-def validate_example(example: Dict, tokenizer=None, model=None, device=None, use_llm: bool = False) -> ValidationResult:
-    """Validate a single training example."""
+def validate_example(example: Dict, tokenizer=None, model=None, device=None, use_llm: bool = False, logger=None) -> ValidationResult:
+    """Validate a single training example.
+    
+    Note: Style violations are treated as warnings, not hard failures.
+    An example is valid if it has no syntax errors or parsing issues.
+    """
     issues = []
     style_violations = []
     improved_code = None
@@ -320,31 +336,33 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
             style_guide_violations=[]
         )
     
-    # 1. Validate Rego syntax
+    # 1. Validate Rego syntax (hard requirement)
     is_valid, error_msg = validate_rego_code(output_code)
     if not is_valid:
         issues.append(f"Rego syntax error: {error_msg}")
     
-    # 2. Check style guide compliance
-    style_violations = check_style_guide_compliance(output_code)
+    # 2. Check style guide compliance using Regal (warnings only)
+    style_violations = check_style_guide_compliance(output_code, logger)
     
-    # 3. Check attestation parsing
+    # 3. Check attestation parsing (hard requirements)
     parsing_issues = check_attestation_parsing(output_code, example.get('instruction', ''))
     issues.extend(parsing_issues)
     
     # 4. Try to improve if there are issues and LLM is available
     improvements = []
     if (issues or style_violations) and use_llm and tokenizer and model:
-        improved_code = improve_example_with_llm(example, issues, style_violations, tokenizer, model, device)
+        improved_code = improve_example_with_llm(example, issues, style_violations, tokenizer, model, device, logger)
         if improved_code:
             improvements.append("Code improved using LLM")
             # Re-validate improved code
             is_valid_improved, _ = validate_rego_code(improved_code)
             if is_valid_improved:
                 issues = []  # Clear issues if improved code is valid
-                style_violations = check_style_guide_compliance(improved_code)
+                style_violations = check_style_guide_compliance(improved_code, logger)
     
-    is_valid = len(issues) == 0 and len(style_violations) == 0
+    # Style violations are warnings, not hard failures
+    # An example is valid if it has no syntax/parsing issues, even with style warnings
+    is_valid = len(issues) == 0
     
     return ValidationResult(
         is_valid=is_valid,
@@ -384,11 +402,16 @@ def process_jsonl_file(input_path: Path, output_path: Path, use_llm: bool = Fals
     
     for line_num, example in examples:
         logger.info(f"Validating example {line_num}/{len(examples)}...")
-        result = validate_example(example, tokenizer, model, device, use_llm)
+        result = validate_example(example, tokenizer, model, device, use_llm, logger)
         validation_results.append((line_num, example, result))
         
         if result.is_valid:
             valid_count += 1
+            # Log style warnings even for valid examples
+            if result.style_guide_violations:
+                logger.debug(f"  ✓ Valid (with style warnings):")
+                for violation in result.style_guide_violations:
+                    logger.debug(f"    - Style: {violation}")
         else:
             invalid_count += 1
             if result.improved_code:
@@ -400,8 +423,11 @@ def process_jsonl_file(input_path: Path, output_path: Path, use_llm: bool = Fals
                 logger.warning(f"  ✗ Example {line_num} has issues:")
                 for issue in result.issues:
                     logger.warning(f"    - {issue}")
-                for violation in result.style_guide_violations:
-                    logger.warning(f"    - Style: {violation}")
+                # Style violations are warnings, not blockers
+                if result.style_guide_violations:
+                    logger.info(f"    Style warnings (non-blocking):")
+                    for violation in result.style_guide_violations:
+                        logger.info(f"      - {violation}")
     
     # Write improved examples
     logger.info(f"Writing results to {output_path}...")
