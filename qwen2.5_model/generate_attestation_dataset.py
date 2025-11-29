@@ -383,7 +383,8 @@ import rego.v1
         """Generate Rego code to check for a task by name."""
         code = f"""some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
-    task.name == "{task_name}\""""
+    task.name == "{task_name}"
+"""
         return RegoCodeGenerator._wrap_in_rule(code, "task_found", RegoCodeGenerator.USE_FULL_RULES, RegoCodeGenerator.USE_DENY_RULES)
     
     @staticmethod
@@ -402,7 +403,8 @@ import rego.v1
             code = f"""some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.name == "{task_name}"
-    task.status == "{status}\""""
+    task.status == "{status}"
+"""
         return RegoCodeGenerator._wrap_in_rule(code, "task_status_check", RegoCodeGenerator.USE_FULL_RULES, RegoCodeGenerator.USE_DENY_RULES)
     
     @staticmethod
@@ -534,11 +536,13 @@ deny contains result if {{
             code = f"""some att in input.attestations
     some material in att.statement.predicate.materials
     material.uri == "{uri}"
-    material.digest.sha1 == "{commit}\""""
+    material.digest.sha1 == "{commit}"
+"""
         else:
             code = f"""some att in input.attestations
     some material in att.statement.predicate.materials
-    material.uri == "{uri}\""""
+    material.uri == "{uri}"
+"""
         return RegoCodeGenerator._wrap_in_rule(code, "material_found", RegoCodeGenerator.USE_FULL_RULES)
     
     @staticmethod
@@ -564,11 +568,23 @@ deny contains result if {{
     
     @staticmethod
     def generate_all_tasks_succeeded() -> str:
-        """Generate Rego code using 'every' for FOR ALL (style guide pattern)."""
+        """Generate Rego code using 'every' for FOR ALL within a single attestation."""
         code = """all_tasks_succeeded if {
     some att in input.attestations
     every task in att.statement.predicate.buildConfig.tasks {
         task.status == "Succeeded"
+    }
+}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "all_tasks_succeeded", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_all_tasks_succeeded_universal() -> str:
+        """Generate Rego code using nested 'every' for FOR ALL across all attestations (universal condition)."""
+        code = """all_tasks_succeeded if {
+    every att in input.attestations {
+        every task in att.statement.predicate.buildConfig.tasks {
+            task.status == "Succeeded"
+        }
     }
 }"""
         return RegoCodeGenerator._wrap_in_rule(code, "all_tasks_succeeded", RegoCodeGenerator.USE_FULL_RULES)
@@ -584,6 +600,40 @@ deny contains result if {{
     }
 }"""
         return RegoCodeGenerator._wrap_in_rule(code, "no_failed_tasks", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_deny_any_task_not_succeeded() -> str:
+        """Generate Rego code using deny pattern for negative existence (any task not succeeded)."""
+        code = """deny contains result if {
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.status != "Succeeded"
+    result := {"msg": sprintf("task %q did not succeed", [task.name])}
+}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
+    
+    @staticmethod
+    def generate_deny_any_task_failed() -> str:
+        """Generate Rego code using deny pattern for negative existence (any task failed)."""
+        code = """deny contains result if {
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.status == "Failed"
+    result := {"msg": sprintf("task %q failed", [task.name])}
+}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
+    
+    @staticmethod
+    def generate_deny_task_with_status(task_name: str, status: str) -> str:
+        """Generate Rego code using deny pattern for specific task with specific status."""
+        code = f"""deny contains result if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    task.status == "{status}"
+    result := {{"msg": sprintf("task %q has status %q", [task.name, task.status])}}
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
     
     @staticmethod
     def generate_valid_task_status(task_name: str, valid_statuses: List[str]) -> str:
@@ -665,6 +715,75 @@ bundle_ref := ref if {{
     uri := material.uri
 }"""
         return RegoCodeGenerator._wrap_in_rule(code, "material_uris", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_return_tasks_by_name(task_name: str) -> str:
+        """Generate Rego code to return all tasks with a specific name (navigation/query pattern)."""
+        code = f"""tasks_named_{task_name.replace("-", "_")} := [task |
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+]"""
+        return RegoCodeGenerator._wrap_in_rule(code, f"tasks_named_{task_name.replace('-', '_')}", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_return_task_names_by_name(task_name: str) -> str:
+        """Generate Rego code to return just the names of tasks with a specific name (set comprehension)."""
+        code = f"""{task_name.replace("-", "_")}_task_names := {{task.name |
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, f"{task_name.replace('-', '_')}_task_names", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_return_task_statuses_by_name(task_name: str) -> str:
+        """Generate Rego code to return (name, status) tuples/objects for tasks with a specific name."""
+        code = f"""{task_name.replace("-", "_")}_task_statuses := [{{"name": task.name, "status": task.status}} |
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+]"""
+        return RegoCodeGenerator._wrap_in_rule(code, f"{task_name.replace('-', '_')}_task_statuses", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_get_param_value(task_name: str, param_name: str) -> str:
+        """Generate Rego code to get a specific parameter value by name (first-class parameter navigation)."""
+        rule_name = f"{task_name.replace('-', '_')}_{param_name.replace('-', '_')}"
+        code = f"""{rule_name} := value if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    some param in task.ref.params
+    param.name == "{param_name}"
+    value := param.value
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, rule_name, RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_get_result_names(task_name: str) -> str:
+        """Generate Rego code to return the names of all result keys for a task."""
+        code = f"""result_names := {{result.name |
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    some result in task.results
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "result_names", RegoCodeGenerator.USE_FULL_RULES)
+    
+    @staticmethod
+    def generate_get_result_by_name(task_name: str, result_name: str) -> str:
+        """Generate Rego code to get a specific result value by name (e.g., exitCode)."""
+        rule_name = f"{task_name.replace('-', '_')}_{result_name.replace('-', '_')}"
+        code = f"""{rule_name} := value if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    some result in task.results
+    result.name == "{result_name}"
+    value := result.value
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, rule_name, RegoCodeGenerator.USE_FULL_RULES)
 
 
 class InstructionGenerator:
@@ -679,6 +798,15 @@ class InstructionGenerator:
         "Search for task '{task_name}' in the attestation",
         "Verify if task '{task_name}' exists in the attestation",
         "Check whether task '{task_name}' is present",
+        # More natural language variations
+        "Is there a task called '{task_name}'?",
+        "Do we have a task named '{task_name}'?",
+        "Can you find task '{task_name}'?",
+        "Look up task '{task_name}'",
+        "See if '{task_name}' task exists",
+        "Check for '{task_name}' task",
+        "Does '{task_name}' exist as a task?",
+        "Is '{task_name}' present in the tasks?",
     ]
     
     TASK_STATUS_TEMPLATES = [
@@ -688,6 +816,15 @@ class InstructionGenerator:
         "What is the status of task '{task_name}'?",
         "Retrieve the status for task '{task_name}'",
         "Determine the status of task '{task_name}'",
+        # More natural language variations
+        "What's the status of '{task_name}'?",
+        "Show me the status for task '{task_name}'",
+        "Tell me the status of '{task_name}'",
+        "How did task '{task_name}' do?",
+        "What status does '{task_name}' have?",
+        "Give me the status of '{task_name}'",
+        "Print the status of task '{task_name}'",
+        "Display the status for '{task_name}'",
     ]
     
     # Validation templates for status - multiple variations that should produce the same deny/check code
@@ -711,6 +848,68 @@ class InstructionGenerator:
         "What are all the task names?",
         "Retrieve all task names",
         "Show all task names in the attestation",
+        # More natural language variations
+        "Print all task names",
+        "What tasks are in here?",
+        "Show me all the task names",
+        "Give me a list of all task names",
+        "Display all task names",
+        "What are the names of all tasks?",
+        "List every task name",
+        "Show what tasks we have",
+    ]
+    
+    # Navigation/query patterns - return tasks directly
+    RETURN_TASKS_BY_NAME_TEMPLATES = [
+        "Return a list of all tasks named '{task_name}'",
+        "Return all tasks named '{task_name}'",
+        "List every task named '{task_name}' across all attestations",
+        "Show me all tasks named '{task_name}'",
+        "Get all tasks with name '{task_name}'",
+        "Return all tasks called '{task_name}'",
+        "Find all tasks named '{task_name}' and return them",
+        # More natural language variations
+        "Print all tasks named '{task_name}'",
+        "List tasks with name '{task_name}'",
+        "Return all {task_name} tasks",
+        "Which tasks use the name '{task_name}'?",
+        "Show all {task_name} tasks",
+        "Give me all tasks named '{task_name}'",
+        "What tasks are called '{task_name}'?",
+        "Display all tasks with the name '{task_name}'",
+        "Find every task that's named '{task_name}'",
+        "I need all tasks named '{task_name}'",
+    ]
+    
+    # Navigation/query patterns - return just names
+    RETURN_TASK_NAMES_BY_NAME_TEMPLATES = [
+        "Return just the names of all tasks named '{task_name}'",
+        "List the names of all tasks named '{task_name}'",
+        "Get the names of all tasks called '{task_name}'",
+        "Return task names for all tasks named '{task_name}'",
+        "Show me the names of all '{task_name}' tasks",
+        # More natural language variations
+        "What are the names of all '{task_name}' tasks?",
+        "Print the names of tasks called '{task_name}'",
+        "Give me just the names for '{task_name}' tasks",
+        "List all task names that are '{task_name}'",
+        "Show task names matching '{task_name}'",
+    ]
+    
+    # Navigation/query patterns - return (name, status) objects
+    RETURN_TASK_STATUSES_BY_NAME_TEMPLATES = [
+        "Show me all tasks named '{task_name}' and their status",
+        "Return all tasks named '{task_name}' with their name and status",
+        "List every task named '{task_name}' with name and status",
+        "Get all '{task_name}' tasks with their name and status",
+        "Return name and status for all tasks named '{task_name}'",
+        "Show all '{task_name}' tasks and their status",
+        # More natural language variations
+        "What are all '{task_name}' tasks and their statuses?",
+        "Print all '{task_name}' tasks with name and status",
+        "Give me '{task_name}' tasks and how they did",
+        "List '{task_name}' tasks and whether they succeeded",
+        "Show '{task_name}' tasks and their completion status",
     ]
     
     TASK_RESULTS_TEMPLATES = [
@@ -720,6 +919,71 @@ class InstructionGenerator:
         "What are the results from task '{task_name}'?",
         "Retrieve results for task '{task_name}'",
         "Show all results from task '{task_name}'",
+        "Return all results for task '{task_name}'",
+        "Get all result objects from task '{task_name}'",
+        "List every result from task '{task_name}'",
+        # More natural language variations
+        "Print all results for '{task_name}'",
+        "What did '{task_name}' produce?",
+        "Show me what '{task_name}' returned",
+        "Give me all the results from '{task_name}'",
+        "Display results for task '{task_name}'",
+        "What outputs did '{task_name}' generate?",
+        "List everything '{task_name}' produced",
+    ]
+    
+    # Parameter navigation templates - first-class parameter access
+    PARAM_VALUE_TEMPLATES = [
+        "Find the value of the {param_name} parameter for task '{task_name}'",
+        "Get the {param_name} parameter value for task '{task_name}'",
+        "Return the value of the {param_name} parameter for task '{task_name}'",
+        "What is the {param_name} parameter value for task '{task_name}'?",
+        "Retrieve the {param_name} parameter for task '{task_name}'",
+        "Get the {param_name} param value from task '{task_name}'",
+        "Find the {param_name} param for task '{task_name}'",
+        # More natural language variations
+        "What's the {param_name} param for '{task_name}'?",
+        "Show me the {param_name} parameter for task '{task_name}'",
+        "Print the {param_name} param value from '{task_name}'",
+        "Give me the {param_name} value for '{task_name}'",
+        "What {param_name} did '{task_name}' use?",
+        "Display the {param_name} parameter for '{task_name}'",
+        "Tell me the {param_name} value for task '{task_name}'",
+    ]
+    
+    # Result navigation templates - result names
+    RESULT_NAMES_TEMPLATES = [
+        "Return the names of all result keys for task '{task_name}'",
+        "Get all result names from task '{task_name}'",
+        "List the names of all results for task '{task_name}'",
+        "What are the result names for task '{task_name}'?",
+        "Show all result key names for task '{task_name}'",
+        "Return all result names from task '{task_name}'",
+        # More natural language variations
+        "Print all result names for '{task_name}'",
+        "What result keys does '{task_name}' have?",
+        "Show me the result names from '{task_name}'",
+        "List what results '{task_name}' produced",
+        "Give me all result key names for '{task_name}'",
+        "What are the names of '{task_name}' results?",
+    ]
+    
+    # Result navigation templates - specific result by name
+    RESULT_BY_NAME_TEMPLATES = [
+        "Return the {result_name} result for task '{task_name}' if present",
+        "Get the {result_name} result value for task '{task_name}'",
+        "Find the {result_name} result for task '{task_name}'",
+        "What is the {result_name} result value for task '{task_name}'?",
+        "Retrieve the {result_name} result from task '{task_name}'",
+        "Get the {result_name} result if present for task '{task_name}'",
+        # More natural language variations
+        "What's the {result_name} for '{task_name}'?",
+        "Show me the {result_name} result from '{task_name}'",
+        "Print the {result_name} value for task '{task_name}'",
+        "Give me the {result_name} from '{task_name}'",
+        "What did '{task_name}' return for {result_name}?",
+        "Display the {result_name} result for '{task_name}'",
+        "Tell me the {result_name} value from '{task_name}'",
     ]
     
     TASK_BUNDLE_TEMPLATES = [
@@ -729,6 +993,14 @@ class InstructionGenerator:
         "What bundle is used by task '{task_name}'?",
         "Retrieve the bundle reference for task '{task_name}'",
         "Find the bundle image for task '{task_name}'",
+        # More natural language variations
+        "What bundle did '{task_name}' use?",
+        "Show me the bundle for '{task_name}'",
+        "Print the bundle reference from '{task_name}'",
+        "Give me the bundle that '{task_name}' used",
+        "What's the bundle image for '{task_name}'?",
+        "Display the bundle for task '{task_name}'",
+        "Tell me which bundle '{task_name}' used",
     ]
     
     # Validation templates - multiple variations that should produce the same deny/check code
@@ -758,6 +1030,17 @@ class InstructionGenerator:
         "Get the finish time for task '{task_name}'",
         "Find when task '{task_name}' finished",
         "What is the finishedOn timestamp for task '{task_name}'?",
+        # More natural language variations
+        "What time did '{task_name}' start?",
+        "Show me when '{task_name}' started",
+        "Print the start time for '{task_name}'",
+        "When was '{task_name}' started?",
+        "What's the start timestamp for '{task_name}'?",
+        "Give me the start time of '{task_name}'",
+        "What time did '{task_name}' finish?",
+        "Show me when '{task_name}' finished",
+        "Print the finish time for '{task_name}'",
+        "When was '{task_name}' completed?",
     ]
     
     SUBJECT_DIGEST_TEMPLATES = [
@@ -848,9 +1131,18 @@ class InstructionGenerator:
         "Find all tasks that failed",
         "Get all succeeded tasks",
         "List all failed tasks",
+        # More natural language variations
+        "Print all tasks with status '{status}'",
+        "Show me tasks that are '{status}'",
+        "Which tasks are '{status}'?",
+        "Give me all '{status}' tasks",
+        "List every task that's '{status}'",
+        "What tasks ended up '{status}'?",
+        "Display all '{status}' tasks",
+        "Show tasks that completed with '{status}'",
     ]
     
-    # Style guide patterns: every (FOR ALL)
+    # Style guide patterns: every (FOR ALL) - single attestation
     ALL_TASKS_SUCCEEDED_TEMPLATES = [
         "Check if all tasks succeeded",
         "Verify all tasks have status 'Succeeded'",
@@ -858,6 +1150,15 @@ class InstructionGenerator:
         "Check that every task succeeded",
         "Verify every task has status 'Succeeded'",
         "Ensure all tasks in the attestation succeeded",
+    ]
+    
+    # Style guide patterns: every (FOR ALL) - universal across all attestations
+    ALL_TASKS_SUCCEEDED_UNIVERSAL_TEMPLATES = [
+        "Ensure all tasks in the attestation have status Succeeded",
+        "Check that every task across all attestations succeeded",
+        "Verify all tasks in all attestations have status 'Succeeded'",
+        "Ensure every task in every attestation succeeded",
+        "Check if all tasks in all attestations are Succeeded",
     ]
     
     # Style guide patterns: not (negation)
@@ -869,10 +1170,37 @@ class InstructionGenerator:
         "Verify there are no failed tasks",
     ]
     
+    # Negative existence patterns: deny if any task not succeeded
+    DENY_ANY_TASK_NOT_SUCCEEDED_TEMPLATES = [
+        "Deny if any task is not Succeeded",
+        "Deny if any task did not succeed",
+        "Deny if any task has a status other than Succeeded",
+        "Deny if any task is not successful",
+        "Deny if any task failed to succeed",
+    ]
+    
+    # Negative existence patterns: deny if any task failed
+    DENY_ANY_TASK_FAILED_TEMPLATES = [
+        "Deny if any task failed",
+        "Deny if any task has status Failed",
+        "Deny if any task is failed",
+        "Deny if there is a failed task",
+    ]
+    
     TASK_NOT_FOUND_TEMPLATES = [
         "Check if task '{task_name}' does not exist",
         "Verify task '{task_name}' is not present",
         "Ensure task '{task_name}' does not exist in the attestation",
+        "Check that task '{task_name}' is not found",
+        "Verify no task named '{task_name}' exists",
+    ]
+    
+    # Deny patterns for specific task with specific status
+    DENY_TASK_WITH_STATUS_TEMPLATES = [
+        "Deny if task '{task_name}' has status '{status}'",
+        "Deny if task '{task_name}' status is '{status}'",
+        "Deny if any attestation has task '{task_name}' with status '{status}'",
+        "Deny if task '{task_name}' is '{status}'",
     ]
     
     # Style guide patterns: in (membership)
@@ -892,14 +1220,39 @@ class InstructionGenerator:
         task_names = {task.get("name") for task in tasks if task.get("name")}
         
         for task_name in task_names:
+            # Get task object once for reuse
+            task = next((t for t in tasks if t.get("name") == task_name), None)
+            
             # Task name check
             template = random.choice(InstructionGenerator.TASK_TEMPLATES)
             instruction = template.format(task_name=task_name)
             rego_code = RegoCodeGenerator.generate_task_name_check(task_name)
             examples.append((instruction, rego_code, {"task_name": task_name}))
             
+            # Navigation/query patterns - return tasks directly (NEW)
+            # Add these patterns with 30% probability to balance dataset
+            if random.random() < 0.3:
+                # Return tasks directly
+                template = random.choice(InstructionGenerator.RETURN_TASKS_BY_NAME_TEMPLATES)
+                instruction = template.format(task_name=task_name)
+                rego_code = RegoCodeGenerator.generate_return_tasks_by_name(task_name)
+                examples.append((instruction, rego_code, {"task_name": task_name, "query_type": "navigation"}))
+            
+            # Navigation/query patterns - return just names (NEW)
+            if random.random() < 0.2:
+                template = random.choice(InstructionGenerator.RETURN_TASK_NAMES_BY_NAME_TEMPLATES)
+                instruction = template.format(task_name=task_name)
+                rego_code = RegoCodeGenerator.generate_return_task_names_by_name(task_name)
+                examples.append((instruction, rego_code, {"task_name": task_name, "query_type": "navigation"}))
+            
+            # Navigation/query patterns - return (name, status) objects (NEW)
+            if task and task.get("status") and random.random() < 0.2:
+                template = random.choice(InstructionGenerator.RETURN_TASK_STATUSES_BY_NAME_TEMPLATES)
+                instruction = template.format(task_name=task_name)
+                rego_code = RegoCodeGenerator.generate_return_task_statuses_by_name(task_name)
+                examples.append((instruction, rego_code, {"task_name": task_name, "query_type": "navigation"}))
+            
             # Task status check
-            task = next((t for t in tasks if t.get("name") == task_name), None)
             if task and task.get("status"):
                 status = task["status"]
                 
@@ -912,6 +1265,14 @@ class InstructionGenerator:
                         instruction = template.format(task_name=task_name, status=status)
                         rego_code = RegoCodeGenerator.generate_check_task_status_value(task_name, status)
                         examples.append((instruction, rego_code, {"task_name": task_name, "status": status, "query_type": "validation"}))
+                    
+                    # NEW: Add deny pattern for specific task with specific status (negative existence)
+                    # 30% chance to also generate deny pattern with sprintf message
+                    if random.random() < 0.3:
+                        template = random.choice(InstructionGenerator.DENY_TASK_WITH_STATUS_TEMPLATES)
+                        instruction = template.format(task_name=task_name, status=status)
+                        rego_code = RegoCodeGenerator.generate_deny_task_with_status(task_name, status)
+                        examples.append((instruction, rego_code, {"task_name": task_name, "status": status, "query_type": "negative_existence"}))
                 else:
                     # Generate retrieval queries
                     # 80% use standard equality, 20% use 'in' for membership (style guide)
@@ -929,23 +1290,48 @@ class InstructionGenerator:
                         rego_code = RegoCodeGenerator.generate_valid_task_status(task_name, valid_statuses)
                         examples.append((instruction, rego_code, {"task_name": task_name, "valid_statuses": valid_statuses}))
             
-            # Task results
+            # Task results - enhanced with more navigation patterns
             if task and task.get("results"):
+                # Basic: return all results
                 template = random.choice(InstructionGenerator.TASK_RESULTS_TEMPLATES)
                 instruction = template.format(task_name=task_name)
                 rego_code = RegoCodeGenerator.generate_get_task_results(task_name)
                 examples.append((instruction, rego_code, {"task_name": task_name}))
+                
+                # NEW: Return result names
+                if random.random() < 0.4:
+                    template = random.choice(InstructionGenerator.RESULT_NAMES_TEMPLATES)
+                    instruction = template.format(task_name=task_name)
+                    rego_code = RegoCodeGenerator.generate_get_result_names(task_name)
+                    examples.append((instruction, rego_code, {"task_name": task_name, "query_type": "navigation"}))
+                
+                # NEW: Return specific result by name (e.g., exitCode)
+                results = task.get("results", [])
+                if results:
+                    # Pick a random result or specifically look for exitCode
+                    result_names = [r.get("name") for r in results if r.get("name")]
+                    if result_names:
+                        # 30% chance to specifically ask for exitCode if it exists, otherwise random
+                        if "exitCode" in result_names and random.random() < 0.3:
+                            result_name = "exitCode"
+                        else:
+                            result_name = random.choice(result_names)
+                        
+                        if random.random() < 0.4:
+                            template = random.choice(InstructionGenerator.RESULT_BY_NAME_TEMPLATES)
+                            instruction = template.format(task_name=task_name, result_name=result_name)
+                            rego_code = RegoCodeGenerator.generate_get_result_by_name(task_name, result_name)
+                            examples.append((instruction, rego_code, {"task_name": task_name, "result_name": result_name, "query_type": "navigation"}))
             
-            # Task bundle - check both ref.bundle and ref.params
-            ref = task.get("ref", {})
-            has_bundle = ref.get("bundle") or (
-                isinstance(ref.get("params"), list) and
-                any(p.get("name") == "bundle" for p in ref.get("params", []))
-            )
+            # Task bundle and parameters - check both ref.bundle and ref.params
+            ref = task.get("ref", {}) if task else {}
+            params = ref.get("params", []) if isinstance(ref.get("params"), list) else []
+            has_bundle = ref.get("bundle") or any(p.get("name") == "bundle" for p in params)
+            
             if task and has_bundle:
                 bundle_value = ref.get("bundle")
-                if not bundle_value and isinstance(ref.get("params"), list):
-                    bundle_param = next((p for p in ref.get("params", []) if p.get("name") == "bundle"), None)
+                if not bundle_value:
+                    bundle_param = next((p for p in params if p.get("name") == "bundle"), None)
                     bundle_value = bundle_param.get("value") if bundle_param else None
                 
                 # 50% retrieval queries, 50% validation queries (with value check)
@@ -970,6 +1356,20 @@ class InstructionGenerator:
                     else:
                         rego_code = RegoCodeGenerator.generate_get_task_bundle(task_name)
                     examples.append((instruction, rego_code, {"task_name": task_name, "query_type": "retrieval"}))
+            
+            # NEW: Parameter navigation - first-class parameter access
+            # Generate examples for each parameter found (excluding bundle which is handled above)
+            if params:
+                for param in params:
+                    param_name = param.get("name")
+                    # Skip bundle parameter as it's already handled above
+                    if param_name and param_name != "bundle":
+                        # 40% chance to generate parameter navigation example
+                        if random.random() < 0.4:
+                            template = random.choice(InstructionGenerator.PARAM_VALUE_TEMPLATES)
+                            instruction = template.format(task_name=task_name, param_name=param_name)
+                            rego_code = RegoCodeGenerator.generate_get_param_value(task_name, param_name)
+                            examples.append((instruction, rego_code, {"task_name": task_name, "param_name": param_name, "query_type": "navigation"}))
         
         # List all task names (once per attestation)
         if task_names:
@@ -980,13 +1380,20 @@ class InstructionGenerator:
         
         # Style guide: Add 'every' FOR ALL queries
         if tasks:
-            # Check if all tasks succeeded
+            # Check if all tasks succeeded (single attestation)
             all_succeeded = all(task.get("status") == "Succeeded" for task in tasks if task.get("status"))
             if all_succeeded or random.random() < 0.3:  # 30% chance to add this query
                 template = random.choice(InstructionGenerator.ALL_TASKS_SUCCEEDED_TEMPLATES)
                 instruction = template
                 rego_code = RegoCodeGenerator.generate_all_tasks_succeeded()
                 examples.append((instruction, rego_code, {}))
+            
+            # NEW: Universal condition across all attestations (nested every)
+            if random.random() < 0.2:  # 20% chance to add universal pattern
+                template = random.choice(InstructionGenerator.ALL_TASKS_SUCCEEDED_UNIVERSAL_TEMPLATES)
+                instruction = template
+                rego_code = RegoCodeGenerator.generate_all_tasks_succeeded_universal()
+                examples.append((instruction, rego_code, {"query_type": "universal"}))
             
             # Style guide: Add 'not' negation queries
             has_failed = any(task.get("status") == "Failed" for task in tasks if task.get("status"))
@@ -995,6 +1402,20 @@ class InstructionGenerator:
                 instruction = template
                 rego_code = RegoCodeGenerator.generate_no_failed_tasks()
                 examples.append((instruction, rego_code, {}))
+            
+            # NEW: Negative existence patterns - deny if any task not succeeded
+            if random.random() < 0.25:  # 25% chance to add deny pattern
+                template = random.choice(InstructionGenerator.DENY_ANY_TASK_NOT_SUCCEEDED_TEMPLATES)
+                instruction = template
+                rego_code = RegoCodeGenerator.generate_deny_any_task_not_succeeded()
+                examples.append((instruction, rego_code, {"query_type": "negative_existence"}))
+            
+            # NEW: Negative existence patterns - deny if any task failed
+            if has_failed or random.random() < 0.25:  # 25% chance to add deny pattern
+                template = random.choice(InstructionGenerator.DENY_ANY_TASK_FAILED_TEMPLATES)
+                instruction = template
+                rego_code = RegoCodeGenerator.generate_deny_any_task_failed()
+                examples.append((instruction, rego_code, {"query_type": "negative_existence"}))
         
         # Style guide: Add task not found queries (negation)
         # Use a task name that doesn't exist in this attestation
@@ -1164,6 +1585,17 @@ class ExampleBuilder:
             if "bundle" in instruction_lower:
                 # Bundle queries need special note about ref structure
                 return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, status, ref.bundle (direct) OR ref.params[] where param.name == 'bundle'\n"
+            elif "param" in instruction_lower:
+                # Parameter navigation queries
+                return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, ref.params[] (array of {name, value} objects)\n# Access parameter: some param in task.ref.params; param.name == 'X'; value := param.value\n"
+            elif "result" in instruction_lower:
+                # Result navigation queries
+                if "name" in instruction_lower and "result" in instruction_lower:
+                    # Result names query
+                    return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, results[] (array of {name, value} objects)\n# Access result names: some result in task.results; result.name\n"
+                else:
+                    # Specific result or all results query
+                    return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, results[] (array of {name, value} objects)\n# Access result: some result in task.results; result.name == 'X'; value := result.value\n"
             else:
                 return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, status, ref.bundle, ref.params[], startedOn, finishedOn, results[]\n"
         elif "material" in instruction_lower:
