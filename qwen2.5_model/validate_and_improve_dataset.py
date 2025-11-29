@@ -336,20 +336,41 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
             # Generate response
             response = generate_response(tokenizer, model, device, messages, max_tokens=1024, temperature=0.3)
             
+            if logger:
+                logger.debug(f"Raw LLM response (attempt {attempt + 1}):\n{response[:500]}...")  # First 500 chars
+            
             # Extract code from response
             improved_code = extract_rego_code(response)
+            
+            if logger:
+                logger.debug(f"Extracted code length: {len(improved_code) if improved_code else 0} characters")
+                if improved_code:
+                    logger.debug(f"Extracted code (full):\n{improved_code}")
+                else:
+                    logger.warning(f"Failed to extract code from response. Response preview:\n{response[:500]}")
             
             if not improved_code:
                 if logger:
                     logger.warning(f"LLM improvement attempt {attempt + 1} returned no code")
+                    logger.warning(f"Raw response was: {response[:200]}")
                 continue
             
+            # Log what we extracted before validation
+            if logger:
+                logger.debug(f"Code before validation ({len(improved_code)} chars):\n{improved_code}")
+            
             # Validate the improved code
-            is_valid, _, error_msg = validate_rego_syntax(
+            is_valid, formatted_code, error_msg = validate_rego_syntax(
                 improved_code,
                 package="attestation_check",
                 imports=["rego.v1"]
             )
+            
+            # Use formatted_code if validation modified it (added package/imports)
+            if formatted_code and formatted_code != improved_code:
+                if logger:
+                    logger.debug(f"Validation added package/imports. Using formatted code.")
+                improved_code = formatted_code
             
             if is_valid:
                 if logger:
@@ -365,8 +386,12 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
                     logger.info("-" * 80)
                     logger.info("CODE IMPROVEMENT - AFTER:")
                     logger.info("-" * 80)
-                    for i, line in enumerate(improved_code.split('\n'), 1):
-                        logger.info(f"{i:4d} | {line}")
+                    if improved_code and improved_code.strip():
+                        for i, line in enumerate(improved_code.split('\n'), 1):
+                            logger.info(f"{i:4d} | {line}")
+                    else:
+                        logger.warning("WARNING: Improved code is empty or invalid!")
+                        logger.warning(f"Raw response was: {response[:500]}")
                     logger.info("=" * 80)
                 return improved_code
             
