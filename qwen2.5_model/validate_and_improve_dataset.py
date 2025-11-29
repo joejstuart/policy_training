@@ -161,6 +161,51 @@ def check_style_guide_compliance(code: str, logger=None) -> List[str]:
     return violations
 
 
+def _format_validation_error(error_msg: str) -> str:
+    """Format validation error message for better readability.
+    
+    Handles both JSON and plain text error formats from OPA and Regal.
+    Both can output JSON with similar structures.
+    """
+    if not error_msg or not error_msg.strip():
+        return "Unknown validation error"
+    
+    # Try to parse as JSON first (both OPA and Regal can output JSON)
+    try:
+        error_json = json.loads(error_msg)
+        
+        # OPA format: {"errors": [{"message": "...", "location": {"row": ..., "col": ...}}]}
+        if 'errors' in error_json:
+            formatted_errors = []
+            for err in error_json['errors']:
+                message = err.get('message', 'Unknown error')
+                location = err.get('location', {})
+                line = location.get('row', location.get('line', '?'))
+                col = location.get('col', location.get('column', '?'))
+                file_path = location.get('file', '')
+                
+                # Format: "Line X, col Y: message" or "file:line:col: message"
+                if file_path and file_path != '<temp file>':
+                    formatted_errors.append(f"{file_path}:{line}:{col}: {message}")
+                else:
+                    formatted_errors.append(f"Line {line}, col {col}: {message}")
+            return "\n".join(formatted_errors)
+        
+        # Regal format might have different structure - handle if needed
+        # Regal typically outputs to stdout in text format, but could be JSON
+        if 'violations' in error_json or 'findings' in error_json:
+            # This is likely Regal output, but we're here for syntax errors (OPA)
+            # Regal violations are handled separately
+            pass
+            
+    except (json.JSONDecodeError, KeyError, TypeError):
+        # Not JSON, return as-is (might already be formatted text)
+        pass
+    
+    # Return original error message (could be plain text from OPA stderr)
+    return error_msg
+
+
 def validate_rego_code(code: str) -> Tuple[bool, str]:
     """Validate Rego code syntax."""
     rego_code = extract_rego_code(code)
@@ -256,8 +301,12 @@ Output only the improved Rego code, no explanations."""
 
 
 def improve_example_with_llm(example: Dict, issues: List[str], style_violations: List[str], 
-                             tokenizer, model, device, logger=None) -> Optional[str]:
-    """Use LLM to improve the example."""
+                             tokenizer, model, device, logger=None, max_corrections: int = 3) -> Optional[str]:
+    """Use LLM to improve the example with iterative correction.
+    
+    If the improved code fails validation, feeds the errors back to the LLM
+    for correction, up to max_corrections times.
+    """
     prompt = create_improvement_prompt(example, issues, style_violations)
     
     messages = [
@@ -273,29 +322,68 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
     
     try:
         from infer_policy import generate_response
-        response = generate_response(tokenizer, model, device, messages, max_tokens=1024, temperature=0.3)
         
-        # Extract code from response
-        improved_code = extract_rego_code(response)
+        for attempt in range(max_corrections):
+            # Generate response
+            response = generate_response(tokenizer, model, device, messages, max_tokens=1024, temperature=0.3)
+            
+            # Extract code from response
+            improved_code = extract_rego_code(response)
+            
+            if not improved_code:
+                if logger:
+                    logger.warning(f"LLM improvement attempt {attempt + 1} returned no code")
+                continue
+            
+            # Validate the improved code
+            is_valid, _, error_msg = validate_rego_syntax(
+                improved_code,
+                package="attestation_check",
+                imports=["rego.v1"]
+            )
+            
+            if is_valid:
+                if attempt > 0 and logger:
+                    logger.info(f"LLM corrected code after {attempt + 1} attempt(s)")
+                return improved_code
+            
+            # Code failed validation - feed error back to LLM
+            if attempt < max_corrections - 1:
+                if logger:
+                    logger.debug(f"LLM code failed validation (attempt {attempt + 1}), feeding error back...")
+                
+                # Format error message for better readability
+                formatted_error = _format_validation_error(error_msg)
+                
+                # Create correction prompt with the validation error
+                correction_prompt = f"""The generated Rego code has syntax errors. Please fix them.
+
+VALIDATION ERRORS:
+{formatted_error}
+
+GENERATED CODE (with errors):
+```rego
+{improved_code}
+```
+
+Please provide the corrected Rego code that fixes these syntax errors. Ensure:
+- All rules have proper 'if' keywords before rule bodies
+- All syntax is valid Rego
+- The code still addresses the original instruction and issues
+
+Output only the corrected Rego code, no explanations."""
+                
+                # Add to conversation for next iteration
+                messages.append({"role": "assistant", "content": improved_code})
+                messages.append({"role": "user", "content": correction_prompt})
+            else:
+                # Max attempts reached
+                if logger:
+                    logger.warning(f"LLM improved code failed validation after {max_corrections} attempts: {error_msg}")
+                return None
         
-        if not improved_code:
-            if logger:
-                logger.warning("LLM improvement returned no code")
-            return None
+        return None
         
-        # Validate the improved code
-        is_valid, _, error_msg = validate_rego_syntax(
-            improved_code,
-            package="attestation_check",
-            imports=["rego.v1"]
-        )
-        
-        if is_valid:
-            return improved_code
-        else:
-            if logger:
-                logger.warning(f"LLM improved code failed validation: {error_msg}")
-            return None
     except Exception as e:
         if logger:
             log_exception(logger, e, context="LLM improvement failed")
@@ -360,7 +448,8 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
             tokenizer,
             model,
             device,
-            logger=logger
+            logger=logger,
+            max_corrections=3
         )
         if improved:
             improved_code = improved
