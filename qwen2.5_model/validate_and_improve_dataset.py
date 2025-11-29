@@ -373,11 +373,26 @@ def improve_example_with_llm(example: Dict, issues: List[str], style_violations:
                 improved_code = formatted_code
             
             if is_valid:
+                # Check if code actually changed
+                original_code = example.get('output_code', '').strip()
+                improved_code_stripped = improved_code.strip() if improved_code else ""
+                
+                # Normalize both codes for comparison (remove extra whitespace)
+                original_normalized = '\n'.join(line.rstrip() for line in original_code.split('\n'))
+                improved_normalized = '\n'.join(line.rstrip() for line in improved_code_stripped.split('\n'))
+                
+                if original_normalized == improved_normalized:
+                    # Code didn't actually change - no need to show before/after
+                    if logger:
+                        logger.debug(f"LLM returned identical code (no changes needed)")
+                    # Return None to indicate no improvement was made
+                    return None
+                
+                # Code actually changed - show before/after
                 if logger:
                     if attempt > 0:
                         logger.info(f"LLM corrected code after {attempt + 1} attempt(s)")
                     # Print before/after comparison
-                    original_code = example.get('output_code', '')
                     logger.info("=" * 80)
                     logger.info("CODE IMPROVEMENT - BEFORE:")
                     logger.info("-" * 80)
@@ -499,7 +514,7 @@ def validate_example(example: Dict, tokenizer=None, model=None, device=None, use
     
     improvements: List[str] = []
     
-    # 5. Use LLM only if something is off
+    # 5. Use LLM if there are issues or style violations to fix
     if (issues or style_violations) and use_llm and tokenizer and model:
         improved = improve_example_with_llm(
             example,
