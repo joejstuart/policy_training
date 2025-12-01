@@ -1608,40 +1608,17 @@ Output format:
 def find_attestation_files(repo_root: Path, max_files: int = 5) -> List[Path]:
     """Find attestation JSON files in the repository root.
     
-    Looks for files matching patterns like:
-    - *.json files in root
-    - Files with 'attestation' in name
-    - Files from quay.io (likely attestations)
+    Only looks for attestation.json in the repo root.
     
     Returns:
-        List of Path objects to attestation files
+        List of Path objects to attestation files (empty if file doesn't exist)
     """
-    attestation_files = []
+    attestation_file = repo_root / "attestation.json"
     
-    # Look for JSON files in root
-    for json_file in repo_root.glob("*.json"):
-        # Skip dataset/summary files
-        if any(skip in json_file.name.lower() for skip in [
-            "dataset", "summary", "eval", "train"
-        ]):
-            continue
-        
-        # Check if it looks like an attestation (has _type or subject or predicate)
-        try:
-            with open(json_file, 'r') as f:
-                content = f.read(1000)  # Read first 1KB
-                if any(marker in content for marker in [
-                    '"subject"', '"predicate"', '"_type"', '"attestations"',
-                    '"buildConfig"', '"tasks"'
-                ]):
-                    attestation_files.append(json_file)
-        except:
-            continue
-        
-        if len(attestation_files) >= max_files:
-            break
+    if attestation_file.exists():
+        return [attestation_file]
     
-    return attestation_files
+    return []
 
 
 def build_implementation_messages(
