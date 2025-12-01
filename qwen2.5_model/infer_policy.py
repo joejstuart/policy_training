@@ -1466,6 +1466,7 @@ def check_execution_against_attestations(
     Uses `opa eval` to execute the code against wrapped attestation data.
     Checks for runtime errors (undefined references, type errors, etc.).
     """
+    import json  # Import at function level to avoid UnboundLocalError
     errors = []
     tested_files = []
     
@@ -1586,7 +1587,6 @@ def check_execution_against_attestations(
                                     # Try to parse JSON error for better message
                                     error_msg = error_output
                                     try:
-                                        import json
                                         error_json = json.loads(error_output)
                                         if isinstance(error_json, dict) and "errors" in error_json:
                                             errors_list = error_json["errors"]
