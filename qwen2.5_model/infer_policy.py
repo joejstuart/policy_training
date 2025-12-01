@@ -994,13 +994,206 @@ def _tree_structure(obj, indent: str = "", max_depth: int = 4) -> str:
         return ""
 
 
-def inspect_attestation_structure_tree(attestation_files: List[Path]) -> str:
+def _extract_example_values(obj, path_parts: List[str], max_examples: int = 3) -> str:
+    """Extract example values for a specific path in the JSON.
+    
+    Args:
+        obj: Current JSON object
+        path_parts: List of path segments to navigate (e.g., ['predicate', 'buildConfig', 'tasks', 'results'])
+        max_examples: Maximum number of examples to show
+        
+    Returns:
+        String showing example values, or empty string if path not found
+    """
+    if not path_parts:
+        # We've reached the target - show the value
+        if isinstance(obj, dict):
+            # Show key-value pairs (limit to first 5 keys)
+            items = list(obj.items())[:5]
+            examples = []
+            for key, val in items:
+                if isinstance(val, (str, int, float, bool)):
+                    examples.append(f"  {key}: {repr(val)}")
+                elif isinstance(val, list):
+                    examples.append(f"  {key}: [array with {len(val)} items]")
+                elif isinstance(val, dict):
+                    examples.append(f"  {key}: {{object with {len(val)} keys}}")
+            if examples:
+                return "\n".join(examples)
+        elif isinstance(obj, list) and len(obj) > 0:
+            # Show first few items
+            examples = []
+            for i, item in enumerate(obj[:max_examples]):
+                if isinstance(item, dict):
+                    # Show key-value pairs of first item
+                    items = list(item.items())[:5]
+                    item_str = ", ".join(f"{k}: {repr(v) if isinstance(v, (str, int, float, bool)) else type(v).__name__}" for k, v in items)
+                    examples.append(f"  [{i}]: {{{item_str}}}")
+                else:
+                    examples.append(f"  [{i}]: {repr(item)}")
+            if len(obj) > max_examples:
+                examples.append(f"  ... ({len(obj) - max_examples} more items)")
+            return "\n".join(examples)
+        return ""
+    
+    # Navigate deeper
+    key = path_parts[0]
+    if isinstance(obj, dict) and key in obj:
+        next_obj = obj[key]
+        # If the value is an array and we have more path parts, navigate into array items
+        if isinstance(next_obj, list) and len(next_obj) > 0 and len(path_parts) > 1:
+            # Try to navigate into first array item with remaining path
+            for item in next_obj[:2]:  # Try first 2 items
+                if isinstance(item, dict):
+                    result = _extract_example_values(item, path_parts[1:], max_examples)
+                    if result:
+                        return result
+            return ""  # Couldn't find path in array items
+        else:
+            # Normal navigation
+            return _extract_example_values(next_obj, path_parts[1:], max_examples)
+    elif isinstance(obj, list) and len(obj) > 0:
+        # Already in an array - try to navigate into first item
+        for item in obj[:2]:  # Try first 2 items
+            if isinstance(item, dict):
+                result = _extract_example_values(item, path_parts, max_examples)
+                if result:
+                    return result
+        return ""  # Couldn't navigate into array items
+    
+    return ""
+
+
+def _extract_keywords_from_instruction(instruction: str) -> List[str]:
+    """Extract relevant keywords from instruction that might match JSON keys.
+    
+    Returns:
+        List of keywords (normalized, singular/plural variants)
+    """
+    instruction_lower = instruction.lower()
+    keywords = []
+    
+    # Common keywords to look for
+    keyword_patterns = {
+        'task': ['task', 'tasks'],
+        'material': ['material', 'materials'],
+        'subject': ['subject', 'subjects'],
+        'builder': ['builder', 'builders'],
+        'result': ['result', 'results'],
+        'digest': ['digest', 'digests'],
+        'bundle': ['bundle', 'bundles'],
+        'artifact': ['artifact', 'artifacts'],
+        'step': ['step', 'steps'],
+        'command': ['command', 'commands'],
+    }
+    
+    # Check which keywords are mentioned in instruction
+    for base_keyword, variants in keyword_patterns.items():
+        if any(variant in instruction_lower for variant in variants):
+            keywords.extend(variants)
+    
+    # Also extract quoted strings (might be specific field names)
+    import re
+    quoted = re.findall(r'["\']([^"\']+)["\']', instruction)
+    keywords.extend([q.lower() for q in quoted])
+    
+    return list(set(keywords))  # Remove duplicates
+
+
+def _find_paths_to_keywords(obj, keywords: List[str], current_path: List[str] = None, max_depth: int = 6) -> List[List[str]]:
+    """Recursively find all paths in JSON that lead to keys matching keywords.
+    
+    Args:
+        obj: Current JSON object
+        keywords: List of keywords to search for (normalized to lowercase)
+        current_path: Current path being explored
+        max_depth: Maximum depth to recurse
+        
+    Returns:
+        List of paths (each path is a list of keys)
+    """
+    if current_path is None:
+        current_path = []
+    
+    if max_depth <= 0:
+        return []
+    
+    found_paths = []
+    
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            key_lower = key.lower()
+            # Check if key matches any keyword (exact match or contains keyword)
+            if any(kw in key_lower or key_lower in kw for kw in keywords):
+                found_paths.append(current_path + [key])
+            
+            # Recurse into nested structures
+            new_path = current_path + [key]
+            if isinstance(value, (dict, list)):
+                found_paths.extend(_find_paths_to_keywords(value, keywords, new_path, max_depth - 1))
+    
+    elif isinstance(obj, list):
+        # For arrays, check first few items
+        for i, item in enumerate(obj[:3]):  # Check first 3 items
+            if isinstance(item, (dict, list)):
+                found_paths.extend(_find_paths_to_keywords(item, keywords, current_path, max_depth - 1))
+    
+    return found_paths
+
+
+def _find_relevant_paths(instruction: str, data: dict) -> List[tuple]:
+    """Dynamically find relevant paths in the data based on instruction keywords.
+    
+    Searches the JSON structure for keys that match keywords from the instruction,
+    then extracts example values from those paths.
+    
+    Returns:
+        List of (path_parts, example_values) tuples
+    """
+    # Extract keywords from instruction
+    keywords = _extract_keywords_from_instruction(instruction)
+    
+    if not keywords:
+        return []
+    
+    # Find all paths that match keywords
+    all_paths = _find_paths_to_keywords(data, keywords, max_depth=6)
+    
+    # Remove duplicate paths and sort by relevance (shorter paths first, then by keyword match)
+    unique_paths = []
+    seen = set()
+    for path in all_paths:
+        path_str = ".".join(path)
+        if path_str not in seen:
+            seen.add(path_str)
+            unique_paths.append(path)
+    
+    # Sort by length (shorter = more specific) and limit to most relevant
+    unique_paths.sort(key=len)
+    unique_paths = unique_paths[:10]  # Limit to top 10 paths
+    
+    # Extract examples for each path
+    relevant_paths = []
+    for path_parts in unique_paths:
+        example_values = _extract_example_values(data, path_parts, max_examples=3)
+        if example_values:
+            relevant_paths.append((path_parts, example_values))
+    
+    return relevant_paths
+
+
+def inspect_attestation_structure_tree(attestation_files: List[Path], instruction: str = "") -> str:
     """Generate a tree structure of the attestation JSON using Python.
     
     Recursively walks the JSON structure and shows all keys in a tree format.
+    Also extracts example values for paths mentioned in the instruction.
+    
+    Args:
+        attestation_files: List of attestation file paths
+        instruction: Optional instruction text to extract relevant examples
     
     Returns:
-        Tree structure string, or empty string if file can't be read
+        Tree structure string with examples, or empty string if file can't be read
     """
     if not attestation_files:
         return ""
@@ -1015,34 +1208,76 @@ def inspect_attestation_structure_tree(attestation_files: List[Path]) -> str:
         with open(att_file, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
+        # Handle wrapped format (input.attestations)
+        if isinstance(data, dict) and "attestations" in data:
+            data = data["attestations"][0] if isinstance(data["attestations"], list) and len(data["attestations"]) > 0 else data
+        elif isinstance(data, list) and len(data) > 0:
+            data = data[0]
+        
         tree_output = _tree_structure(data, max_depth=4).strip()
         
-        if tree_output:
-            # Limit output to first 2000 characters to avoid overwhelming the model
-            if len(tree_output) > 2000:
-                tree_output = tree_output[:2000] + "\n... (truncated)"
-            
-            return f"""ATTESTATION STRUCTURE (from {att_file.name}):
-{tree_output}
-
-IMPORTANT: Use this structure to find the CORRECT paths based on the instruction keywords:
-- If instruction mentions "task" or "tasks" → look for predicate.buildConfig.tasks[]
-- If instruction mentions "material" or "materials" → look for predicate.materials[]
-- If instruction mentions "subject" → look for subject[]
-- If instruction mentions "builder" → look for predicate.builder
-- Pay attention to the structure above to find the exact path
+        # Extract example values for relevant paths mentioned in instruction
+        example_sections = []
+        relevant_paths = []
+        if instruction:
+            relevant_paths = _find_relevant_paths(instruction, data)
+            for path_parts, example_values in relevant_paths:
+                path_str = " → ".join(path_parts)
+                example_sections.append(f"EXAMPLE VALUES for path '{path_str}':\n{example_values}")
+        
+        # Combine structure and examples
+        output_parts = [f"ATTESTATION STRUCTURE (from {att_file.name}):\n{tree_output}"]
+        
+        # Build dynamic guidance based on discovered paths
+        guidance_parts = []
+        if instruction and relevant_paths:
+            guidance_parts.append("IMPORTANT: Based on your instruction, the following paths were found:")
+            for path_parts, example_values in relevant_paths:
+                path_str = " → ".join(path_parts)
+                # Check if this path ends in an array by examining the example
+                is_array = example_values.strip().startswith("[") or "array" in example_values.lower()
+                if is_array:
+                    guidance_parts.append(f"- Path '{path_str}' → This is an ARRAY. See example values below.")
+                else:
+                    guidance_parts.append(f"- Path '{path_str}' → See example values below.")
+            guidance_parts.append("")
+        
+        if example_sections:
+            output_parts.append("\n" + "\n\n".join(example_sections))
+        
+        guidance_parts.append("""
+CRITICAL: When checking values in arrays:
+- Arrays are shown as [] in the structure tree above
+- To check if an array contains an item with a specific field value, you MUST iterate:
+  - Use: some item in array; item.field == "value"
+  - Example: some result in task.results; result.name == "commit"
+- DO NOT access array fields directly (e.g., task.results.commit is WRONG if results is an array)
+- Check the example values above to see the actual structure of array items
 
 This shows the JSON structure. Use this to understand:
-- Which paths exist (e.g., predicate.buildConfig.tasks, predicate.materials)
-- Whether arrays exist (shown as [])
+- Which paths exist in the attestation
+- Whether fields are arrays (shown as [])
 - The nesting level of fields
+- The actual structure of array items (see examples above)
 
 For Rego code:
 - If the file has an 'attestations' array at the top, use: some att in input.attestations
 - If the file is a single attestation object, use: input directly
 - Navigate using dot notation based on the structure above
 - Iterate arrays with: some item in array; item.field
-"""
+- When checking array items, use: some item in array; item.field == "value"
+""")
+        
+        if guidance_parts:
+            output_parts.append("\n" + "\n".join(guidance_parts))
+        
+        full_output = "\n".join(output_parts)
+        
+        # Limit output to avoid overwhelming the model
+        if len(full_output) > 3000:
+            full_output = full_output[:3000] + "\n... (truncated)"
+        
+        return full_output
     except (json.JSONDecodeError, IOError, Exception) as e:
         # File read or JSON parse failed, return empty
         import sys
@@ -1067,23 +1302,23 @@ def generate_plan(
     # Inspect attestation structure if files are provided and instruction mentions attestations
     # Only use the first file for structure inspection (all attestations should have same structure)
     attestation_structure = ""
-    if attestation_files and any(kw in instruction.lower() for kw in ['attestation', 'task', 'subject', 'material', 'build']):
+    if attestation_files and any(kw in instruction.lower() for kw in ['attestation', 'task', 'subject', 'material', 'build', 'result']):
         try:
             # Only use first file for structure (they should all have the same structure)
             structure_files = [attestation_files[0]] if attestation_files else []
-            attestation_structure = inspect_attestation_structure_tree(structure_files)
+            attestation_structure = inspect_attestation_structure_tree(structure_files, instruction=instruction)
             if verbose and attestation_structure:
                 print(f"  ✓ Attestation structure extracted from 1 file ({len(attestation_structure)} chars)")
             elif verbose and not attestation_structure:
                 print(f"  ⚠ Attestation structure extraction returned empty")
         except Exception as e:
-            # If jq fails, continue without structure info
+            # If extraction fails, continue without structure info
             import sys
             import os
             if verbose:
                 print(f"  ⚠ Failed to extract attestation structure: {e}")
             if os.getenv("VERBOSE_DEBUG", "false").lower() == "true":
-                print(f"DEBUG: jq structure inspection failed: {e}", file=sys.stderr)
+                print(f"DEBUG: structure inspection failed: {e}", file=sys.stderr)
             pass
     
     planning_prompt = f"""Analyze this instruction and create a plan for implementing it.
@@ -1095,12 +1330,17 @@ Instruction: {instruction}
 {attestation_structure if attestation_structure else ""}
 
 Create a structured plan that includes:
-1. What the instruction is asking for (pay attention to keywords like "task", "material", "subject")
+1. What the instruction is asking for (pay attention to keywords like "task", "material", "subject", "result")
 2. What Rego patterns/constructs are needed
 3. Which helpers from the context should be used
 4. The expected rule structure (deny/warn/allow, conditions, etc.)
 5. Any potential challenges or considerations
-{f"6. CRITICAL: Use the attestation structure above to identify the CORRECT JSON path. Match instruction keywords (task/material/subject) to the structure paths" if attestation_structure else ""}
+{f"6. CRITICAL: Use the attestation structure above to identify the CORRECT JSON path. Match instruction keywords (task/material/subject/result) to the structure paths" if attestation_structure else ""}
+{f"7. CRITICAL: Pay attention to the EXAMPLE VALUES shown above. If you see arrays ([]), understand that:" if attestation_structure else ""}
+{f"   - Arrays contain multiple items, each with their own fields" if attestation_structure else ""}
+{f"   - To check if an array contains an item with a specific field value, you MUST iterate: some item in array; item.field == \"value\"" if attestation_structure else ""}
+{f"   - Example: If results is an array and you need to check for result.name == \"commit\", use: some result in task.results; result.name == \"commit\"" if attestation_structure else ""}
+{f"   - DO NOT access array fields directly (e.g., task.results.commit is WRONG if results is an array)" if attestation_structure else ""}
 
 Provide a clear, structured plan."""
     
