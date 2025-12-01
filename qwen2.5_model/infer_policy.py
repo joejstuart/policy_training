@@ -1512,9 +1512,39 @@ def check_execution_against_attestations(
                                 # Check if it's a "not found" error (acceptable)
                                 error_output = result.stderr or result.stdout
                                 if "undefined" not in error_output.lower():
+                                    # Try to parse JSON error for better message
+                                    error_msg = error_output
+                                    try:
+                                        import json
+                                        error_json = json.loads(error_output)
+                                        if isinstance(error_json, dict) and "errors" in error_json:
+                                            errors_list = error_json["errors"]
+                                            if errors_list:
+                                                first_error = errors_list[0]
+                                                msg = first_error.get("message", "")
+                                                location = first_error.get("location", {})
+                                                row = location.get("row", "")
+                                                col = location.get("col", "")
+                                                code_type = first_error.get("code", "")
+                                                
+                                                # Build clearer error message
+                                                if row:
+                                                    error_msg = f"{msg} (line {row}"
+                                                    if col:
+                                                        error_msg += f", col {col}"
+                                                    error_msg += ")"
+                                                else:
+                                                    error_msg = msg
+                                                
+                                                if code_type:
+                                                    error_msg = f"[{code_type}] {error_msg}"
+                                    except (json.JSONDecodeError, KeyError, TypeError):
+                                        # Not JSON or unexpected format, use truncated original
+                                        error_msg = error_output[:500]  # Increased from 200
+                                    
                                     # Real error, not just "rule not found"
                                     execution_errors.append(
-                                        f"Query '{query}' failed: {error_output[:200]}"
+                                        f"Query '{query}' failed: {error_msg}"
                                     )
                         except subprocess.TimeoutExpired:
                             execution_errors.append(f"Query '{query}' timed out")
