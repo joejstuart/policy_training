@@ -1314,7 +1314,7 @@ def generate_plan(
                 print(f"DEBUG: structure inspection failed: {e}", file=sys.stderr)
             pass
     
-    planning_prompt = f"""Analyze this instruction and create a plan for implementing it.
+    planning_prompt = f"""Analyze this instruction and create a detailed implementation plan. DO NOT write code yet - only create a plan.
 
 Instruction: {instruction}
 
@@ -1322,27 +1322,98 @@ Instruction: {instruction}
 
 {attestation_structure if attestation_structure else ""}
 
-Create a structured plan that includes:
-1. What the instruction is asking for (pay attention to keywords like "task", "material", "subject", "result")
-2. What Rego patterns/constructs are needed
-3. Which helpers from the context should be used
-4. The expected rule structure (deny/warn/allow, conditions, etc.)
-5. Any potential challenges or considerations
-{f"6. CRITICAL: Use the attestation structure above to identify the CORRECT JSON path. Match instruction keywords (task/material/subject/result) to the structure paths" if attestation_structure else ""}
-{f"7. CRITICAL: Pay attention to the EXAMPLE VALUES shown above. If you see arrays ([]), understand that:" if attestation_structure else ""}
-{f"   - Arrays contain multiple items, each with their own fields" if attestation_structure else ""}
-{f"   - To check if an array contains an item with a specific field value, you MUST iterate: some item in array; item.field == \"value\"" if attestation_structure else ""}
-{f"   - Example: If results is an array and you need to check for result.name == \"commit\", use: some result in task.results; result.name == \"commit\"" if attestation_structure else ""}
-{f"   - DO NOT access array fields directly (e.g., task.results.commit is WRONG if results is an array)" if attestation_structure else ""}
+Create a structured plan using this format:
 
-Provide a clear, structured plan."""
+## 1. Requirements Analysis
+- What is the instruction asking for?
+- What keywords are mentioned? (task, material, subject, result, etc.)
+- What conditions need to be checked?
+
+## 2. Data Structure Navigation
+{f"- Based on the attestation structure above, identify the correct JSON paths" if attestation_structure else "- Identify the JSON paths needed"}
+- Which arrays need to be iterated?
+- What fields need to be accessed?
+{f"- Pay attention to EXAMPLE VALUES: Are any fields arrays? If so, they must be iterated with 'some item in array'" if attestation_structure else ""}
+
+## 3. Rego Patterns Needed
+- What rule type? (deny/warn/allow)
+- What iteration patterns? (some, every)
+- What comparison operators?
+- Any helper functions needed?
+
+## 4. Implementation Strategy
+- Step-by-step approach
+- Order of conditions
+- Variable naming strategy
+- Error handling considerations
+
+## 5. Potential Challenges
+- What could go wrong?
+- Common pitfalls to avoid
+{f"- Array iteration: Remember arrays must use 'some item in array', not direct field access" if attestation_structure else ""}
+- Variable scoping issues
+
+{f"CRITICAL NOTES:" if attestation_structure else ""}
+{f"- Match instruction keywords to the structure paths shown above" if attestation_structure else ""}
+{f"- If you see arrays in the example values, you MUST iterate them" if attestation_structure else ""}
+{f"- DO NOT write code - only describe the plan" if True else ""}
+
+Provide ONLY the plan, no code."""
+    
+    # Example of a good plan (few-shot example)
+    example_plan = """## 1. Requirements Analysis
+- Instruction asks to check all tasks for a result named 'commit'
+- Keywords: "task", "result", "commit"
+- Need to verify that every task has a result with name 'commit'
+
+## 2. Data Structure Navigation
+- Path: input.attestations[].statement.predicate.buildConfig.tasks[]
+- tasks is an array - must iterate with 'some task in ...'
+- Each task has a results array - must iterate with 'some result in task.results'
+- Check result.name == "commit"
+
+## 3. Rego Patterns Needed
+- Rule type: deny (or warn, depending on requirement)
+- Use 'every task in ...' for "all tasks" requirement
+- Use 'some result in task.results' to iterate results array
+- Comparison: result.name == "commit"
+
+## 4. Implementation Strategy
+- Iterate through all tasks using 'every'
+- For each task, iterate through results
+- Check if any result has name "commit"
+- If missing, create deny result
+
+## 5. Potential Challenges
+- Variable scoping: Use different variable names for iteration vs assignment
+- Array iteration: Must use 'some result in task.results', not 'task.results.commit'
+- Input path: Must start with 'input.attestations'"""
     
     messages = [
-        {"role": "system", "content": "You are a Rego policy planning assistant. Create clear, structured plans."},
+        {"role": "system", "content": "You are a Rego policy planning assistant. Your job is to create detailed, structured plans for implementing Rego policies. You should analyze requirements, identify data structures, and plan the implementation approach. DO NOT write code - only create plans. Use clear sections and bullet points."},
+        {"role": "user", "content": "Example instruction: Write a rule that checks all tasks for a result named 'commit'"},
+        {"role": "assistant", "content": example_plan},
         {"role": "user", "content": planning_prompt}
     ]
     
-    plan = generate_response(tokenizer, model, device, messages, max_tokens=512, temperature=0.3)
+    plan = generate_response(tokenizer, model, device, messages, max_tokens=1024, temperature=0.3)
+    
+    # Post-process: Remove code blocks if model outputs code instead of plan
+    # Check if plan contains code blocks
+    if "```" in plan:
+        # Try to extract just the plan part (before code blocks)
+        parts = plan.split("```")
+        if len(parts) > 0:
+            # Take the part before the first code block
+            plan_text = parts[0].strip()
+            # If there's substantial text before code, use it
+            if len(plan_text) > 100:
+                plan = plan_text
+            else:
+                # If code is the main content, warn but keep it (better than nothing)
+                if verbose:
+                    print("  ⚠ Warning: Plan contains code blocks, but keeping for now")
+    
     return plan
 
 
