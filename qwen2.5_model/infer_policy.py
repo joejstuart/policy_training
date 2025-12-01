@@ -1246,14 +1246,6 @@ def inspect_attestation_structure_tree(attestation_files: List[Path], instructio
             output_parts.append("\n" + "\n\n".join(example_sections))
         
         guidance_parts.append("""
-CRITICAL: When checking values in arrays:
-- Arrays are shown as [] in the structure tree above
-- To check if an array contains an item with a specific field value, you MUST iterate:
-  - Use: some item in array; item.field == "value"
-  - Example: some result in task.results; result.name == "commit"
-- DO NOT access array fields directly (e.g., task.results.commit is WRONG if results is an array)
-- Check the example values above to see the actual structure of array items
-
 This shows the JSON structure. Use this to understand:
 - Which paths exist in the attestation
 - Whether fields are arrays (shown as [])
@@ -1264,8 +1256,9 @@ For Rego code:
 - If the file has an 'attestations' array at the top, use: some att in input.attestations
 - If the file is a single attestation object, use: input directly
 - Navigate using dot notation based on the structure above
-- Iterate arrays with: some item in array; item.field
-- When checking array items, use: some item in array; item.field == "value"
+- Iterate arrays with: some item in array; item
+- If an array contains a list of objects, use: some item in array; item.field == value
+- If an array contains a list of strings, use: some item in array; item == value
 """)
         
         if guidance_parts:
