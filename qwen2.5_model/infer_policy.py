@@ -1955,8 +1955,9 @@ def agentic_inference(
                     print("  " + "-" * 56)
                 
                 # Extract repaired code
+                from rego_validator import has_meaningful_content
                 repaired_code = extract_rego_code(repair_response)
-                if repaired_code:
+                if repaired_code and has_meaningful_content(repaired_code):
                     state.implementation = repaired_code
                     if verbose:
                         print(f"  ✓ Repaired code extracted ({len(repaired_code)} chars):")
@@ -2066,7 +2067,21 @@ def agentic_inference(
     
     # Return the best code we've seen, or the last implementation, or empty string
     # Prefer best_code if it exists (even if invalid, it's better than nothing)
-    final_code = state.best_code or state.implementation or ""
+    # But filter out code that's only package/imports
+    from rego_validator import has_meaningful_content
+    
+    final_code = None
+    for candidate in [state.best_code, state.implementation]:
+        if candidate and has_meaningful_content(candidate):
+            final_code = candidate
+            break
+    
+    # If no meaningful code found, return empty string with error
+    if not final_code:
+        if verbose:
+            print("⚠ No meaningful code found (only package/imports). Returning empty result.")
+        state.errors.append("No meaningful code generated (only package/imports, no actual rules)")
+        return "", state
     
     # Format and validate the final code one more time
     # This ensures we return properly formatted code and only show errors from the final code

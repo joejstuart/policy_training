@@ -13,10 +13,51 @@ from pathlib import Path
 from typing import Tuple, Optional, List
 
 
+def has_meaningful_content(code: str) -> bool:
+    """Check if code has actual rules/content, not just package/imports.
+    
+    Returns True if code contains at least one rule (deny/warn/allow) or function definition.
+    """
+    if not code:
+        return False
+    
+    code_lower = code.lower()
+    
+    # Remove package and import lines to check what's left
+    lines = code.split('\n')
+    content_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip package, import, and empty lines
+        if stripped.startswith('package ') or stripped.startswith('import ') or not stripped:
+            continue
+        content_lines.append(stripped)
+    
+    # If no content lines after removing package/imports, it's not meaningful
+    if not content_lines:
+        return False
+    
+    # Check for actual rules or functions
+    # Look for: deny, warn, allow, rule definitions, function definitions
+    meaningful_patterns = [
+        r'\bdeny\s+',
+        r'\bwarn\s+',
+        r'\ballow\s+',
+        r'\bcontains\s+',
+        r'\bif\s+\{',  # Rule body
+        r':=\s+',  # Assignment (likely in a rule)
+        r'\bdefault\s+',  # Default rule
+    ]
+    
+    content_text = '\n'.join(content_lines)
+    return any(re.search(pattern, content_text, re.IGNORECASE) for pattern in meaningful_patterns)
+
+
 def extract_rego_code(text: str) -> Optional[str]:
     """Extract Rego code from model response.
     
     Looks for code blocks marked with ```rego or ``` or just Rego code.
+    Only returns code that has meaningful content (actual rules, not just package/imports).
     """
     # First, try to find markdown code blocks (most common format)
     # Pattern: ```rego\n...code...\n``` or ```\n...code...\n```
@@ -34,29 +75,42 @@ def extract_rego_code(text: str) -> Optional[str]:
             # Remove all backticks - they shouldn't be in Rego code anyway
             code = code.replace('`', '')
             code = code.strip()
-            if code:
+            if code and has_meaningful_content(code):
                 return code
     
     # If no code block, look for package declaration (likely Rego code)
+    # But be more careful - extract more content, not stopping at first double newline
     if 'package ' in text:
-        # Extract from first package to end (or next markdown code block)
-        # Stop at ``` or end of string
-        match = re.search(r'(package\s+\S+.*?)(?:\n\n|```|$)', text, re.DOTALL)
-        if match:
-            code = match.group(1).strip()
+        # Try to find the full code block - look for package and then continue until we hit meaningful content
+        # First, find where package starts
+        package_match = re.search(r'package\s+\S+', text)
+        if package_match:
+            start_pos = package_match.start()
+            # Extract from package to end of text (or next markdown block)
+            # But we need to make sure we get the full code, not stop at first \n\n
+            remaining = text[start_pos:]
+            # Stop at ``` or end, but don't stop at \n\n if there's more content
+            # Look for the end of the code block
+            end_match = re.search(r'```', remaining)
+            if end_match:
+                code = remaining[:end_match.start()].strip()
+            else:
+                # No closing ```, take everything but stop at next markdown block or end
+                code = remaining.split('```')[0].strip()
+            
             # Remove any backticks
             code = code.replace('`', '')
             code = code.strip()
-            if code:
+            if code and has_meaningful_content(code):
                 return code
     
-    # Last resort: return the whole text if it looks like Rego
+    # Last resort: return the whole text if it looks like Rego and has meaningful content
     if 'package ' in text or 'deny ' in text or 'warn ' in text or 'allow ' in text:
         code = text.strip()
         # Remove any backticks
         code = code.replace('`', '')
         code = code.strip()
-        if code:
+        if code and has_meaningful_content(code):
             return code
     
     return None
