@@ -18,22 +18,46 @@ def extract_rego_code(text: str) -> Optional[str]:
     
     Looks for code blocks marked with ```rego or ``` or just Rego code.
     """
-    # Try to find code blocks
-    code_block_pattern = r'```(?:rego)?\s*\n(.*?)```'
-    matches = re.findall(code_block_pattern, text, re.DOTALL)
-    if matches:
-        return matches[0].strip()
+    # First, try to find markdown code blocks (most common format)
+    # Pattern: ```rego\n...code...\n``` or ```\n...code...\n```
+    # Use a more robust pattern that handles various whitespace
+    code_block_patterns = [
+        r'```rego\s*\n(.*?)```',  # ```rego ... ```
+        r'```\s*\n(.*?)```',       # ``` ... ```
+    ]
+    
+    for pattern in code_block_patterns:
+        matches = re.findall(pattern, text, re.DOTALL)
+        if matches:
+            code = matches[0].strip()
+            # Aggressively remove any backticks (markdown artifacts)
+            # Remove all backticks - they shouldn't be in Rego code anyway
+            code = code.replace('`', '')
+            code = code.strip()
+            if code:
+                return code
     
     # If no code block, look for package declaration (likely Rego code)
     if 'package ' in text:
         # Extract from first package to end (or next markdown code block)
+        # Stop at ``` or end of string
         match = re.search(r'(package\s+\S+.*?)(?:\n\n|```|$)', text, re.DOTALL)
         if match:
-            return match.group(1).strip()
+            code = match.group(1).strip()
+            # Remove any backticks
+            code = code.replace('`', '')
+            code = code.strip()
+            if code:
+                return code
     
     # Last resort: return the whole text if it looks like Rego
     if 'package ' in text or 'deny ' in text or 'warn ' in text or 'allow ' in text:
-        return text.strip()
+        code = text.strip()
+        # Remove any backticks
+        code = code.replace('`', '')
+        code = code.strip()
+        if code:
+            return code
     
     return None
 
@@ -52,23 +76,63 @@ def validate_rego_syntax(code: str, package: str = "", imports: List[str] = None
     if imports is None:
         imports = []
     
+    # Clean the code - aggressively remove ALL backticks (markdown artifacts)
+    # Rego doesn't use backticks, so any backticks are definitely markdown artifacts
+    # Remove all backticks from the code
+    code = code.replace('`', '')
+    code = code.strip()
+    
+    # Also clean each line individually to catch any edge cases
+    lines = code.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        # Remove any backticks from the line
+        cleaned_line = line.replace('`', '').strip()
+        if cleaned_line:  # Only add non-empty lines
+            cleaned_lines.append(cleaned_line)
+    code = '\n'.join(cleaned_lines)
+    
     # Build complete code with package and imports if needed
     complete_code = code
+    added_package = False
+    added_imports = []
     if package and f"package {package}" not in code:
         complete_code_parts = [f"package {package}\n"]
+        added_package = True
         complete_code_parts.append("import rego.v1\n")
+        added_imports.append("rego.v1")
         for imp in imports:
             if not imp.startswith("rego.v1") and f"import {imp}" not in code:
                 complete_code_parts.append(f"import {imp}\n")
+                added_imports.append(imp)
         complete_code_parts.append("\n")
         complete_code_parts.append(code)
         complete_code = "".join(complete_code_parts)
     
-    # Write to temp file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.rego', delete=False) as tmp_file:
-        tmp_path = Path(tmp_file.name)
+    # Final safety check: remove ALL backticks from complete_code
+    # This is the last chance to catch any backticks before writing to file
+    if '`' in complete_code:
+        print(f"WARNING: Backticks found in complete_code before writing! Removing them.")
+        complete_code = complete_code.replace('`', '')
+    
+    # Write to temp file (preserve for debugging)
+    # Use a more descriptive name and don't auto-delete
+    import time
+    timestamp = int(time.time() * 1000)
+    tmp_path = Path(tempfile.gettempdir()) / f"rego_validate_{timestamp}.rego"
+    with open(tmp_path, 'w', encoding='utf-8') as tmp_file:
         tmp_file.write(complete_code)
         tmp_file.flush()
+    
+    # Debug: print what we're writing (first 200 chars)
+    print(f"DEBUG: Writing to {tmp_path}")
+    print(f"DEBUG: First 200 chars of code: {repr(complete_code[:200])}")
+    print(f"DEBUG: Code contains backticks: {'`' in complete_code}")
+    if '`' in complete_code:
+        # Find where backticks are
+        for i, char in enumerate(complete_code[:100]):
+            if char == '`':
+                print(f"DEBUG: Backtick found at position {i}: {repr(complete_code[max(0,i-10):i+10])}")
     
     error_msg = ""
     formatted_code = code
@@ -116,14 +180,56 @@ def validate_rego_syntax(code: str, package: str = "", imports: List[str] = None
         except Exception as e:
             return False, code, f"opa parse error: {e}"
         
+        # 2. opa fmt (format code for proper indentation)
+        # Format the code using opa fmt for proper indentation
+        try:
+            fmt_result = subprocess.run(
+                opa_base + ["fmt", str(tmp_path)],
+                capture_output=True,
+                timeout=3,
+                text=True
+            )
+            if fmt_result.returncode == 0 and fmt_result.stdout:
+                # opa fmt outputs the formatted code to stdout
+                formatted_complete = fmt_result.stdout.strip()
+                
+                # If we added package/imports, extract just the formatted original code
+                if added_package:
+                    # Remove the package and imports we added
+                    lines = formatted_complete.split('\n')
+                    # Skip package line
+                    if lines and lines[0].startswith('package'):
+                        lines = lines[1:]
+                    # Skip import lines we added
+                    for imp in added_imports:
+                        while lines and (lines[0].strip().startswith('import') or not lines[0].strip()):
+                            if lines[0].strip().startswith(f'import {imp}') or lines[0].strip() == '':
+                                lines = lines[1:]
+                            else:
+                                break
+                    # Skip empty lines at start
+                    while lines and not lines[0].strip():
+                        lines = lines[1:]
+                    formatted_code = '\n'.join(lines).strip()
+                else:
+                    formatted_code = formatted_complete
+            # If fmt fails, keep the original formatted_code (from parse)
+        except Exception:
+            # If fmt is not available or fails, keep original formatted_code
+            pass
+        
         return True, formatted_code, ""
     
     finally:
-        # Clean up temp file
-        try:
-            tmp_path.unlink()
-        except Exception:
-            pass
+        # PRESERVE temp file for debugging - don't delete
+        # User can inspect the file to see what was written
+        print(f"DEBUG: Temp file preserved at: {tmp_path}")
+        print(f"DEBUG: To inspect: cat {tmp_path}")
+        # Uncomment the following line to auto-delete after debugging:
+        # try:
+        #     tmp_path.unlink()
+        # except Exception:
+        #     pass
 
 
 def test_rego_code(code: str, test_dir: Optional[Path] = None) -> Tuple[bool, str]:

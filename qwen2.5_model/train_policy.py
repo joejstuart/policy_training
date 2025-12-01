@@ -527,7 +527,7 @@ Examples:
     parser.add_argument(
         "--model-name",
         type=str,
-        default="Qwen/Qwen2.5-1.5B-Instruct",
+        default="Qwen/Qwen3-4B-Instruct",
         help="HuggingFace model name",
     )
     parser.add_argument(
