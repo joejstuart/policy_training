@@ -100,11 +100,11 @@ STYLE_GUIDE_CONDENSED = """# Rego Style Guide - Key Patterns for Attestation Par
    - Avoid: `task.status == "Succeeded"` (when checking multiple values)
 
 2. **Use `every` for FOR ALL queries**:
-   - Prefer: `every task in att.statement.predicate.buildConfig.tasks { task.status == "Succeeded" }`
+   - Prefer: `every task in att.predicate.buildConfig.tasks { task.status == "Succeeded" }`
    - Use for: "all tasks succeeded", "verify all tasks have X"
 
 3. **Use `some ... in` for iteration**:
-   - Prefer: `some task in att.statement.predicate.buildConfig.tasks`
+   - Prefer: `some task in att.predicate.buildConfig.tasks`
    - This is the modern, declarative pattern
 
 4. **Prefer sets over arrays when order doesn't matter**:
@@ -1367,7 +1367,7 @@ Provide ONLY the plan, no code."""
 - Need to verify that every task has a result with name 'commit'
 
 ## 2. Data Structure Navigation
-- Path: input.attestations[].statement.predicate.buildConfig.tasks[]
+- Path: input.attestations[].predicate.buildConfig.tasks[]
 - tasks is an array - must iterate with 'some task in ...'
 - Each task has a results array - must iterate with 'some result in task.results'
 - Check result.name == "commit"
@@ -2246,6 +2246,53 @@ def agentic_inference(
         if state.iteration < max_iterations:
             if verbose:
                 print("  🔧 Phase 5: Repairing...")
+                # Show what error messages are being sent to the model
+                print("  Error messages being sent to model:")
+                print("  " + "-" * 56)
+                
+                # Build the same validation feedback that will be sent
+                import json
+                feedback_parts = []
+                
+                if not validation_results["syntax"]["valid"]:
+                    error_msg = validation_results["syntax"]["error_msg"]
+                    try:
+                        error_data = json.loads(error_msg)
+                        if isinstance(error_data, dict) and "errors" in error_data:
+                            parsed_error = error_data["errors"][0] if error_data["errors"] else None
+                            if parsed_error:
+                                msg = parsed_error.get("message", "")
+                                location = parsed_error.get("location", {})
+                                row = location.get("row", "")
+                                col = location.get("col", "")
+                                feedback_parts.append(f"  ❌ SYNTAX ERROR: {msg}")
+                                if row:
+                                    feedback_parts.append(f"     Location: Line {row}, Column {col}")
+                    except:
+                        feedback_parts.append(f"  ❌ SYNTAX ERROR: {error_msg[:200]}")
+                
+                if not validation_results["execution"]["valid"]:
+                    exec_errors = validation_results["execution"]["errors"]
+                    feedback_parts.append(f"  ⚠️ EXECUTION ERRORS ({len(exec_errors)} error(s)):")
+                    for i, err in enumerate(exec_errors[:3], 1):
+                        feedback_parts.append(f"     {i}. {err}")
+                    if len(exec_errors) > 3:
+                        feedback_parts.append(f"     ... and {len(exec_errors) - 3} more")
+                
+                if not validation_results["style"]["valid"]:
+                    style_violations = validation_results["style"]["violations"]
+                    feedback_parts.append(f"  💡 STYLE VIOLATIONS ({len(style_violations)} violation(s)):")
+                    for i, violation in enumerate(style_violations[:3], 1):
+                        feedback_parts.append(f"     {i}. {violation}")
+                    if len(style_violations) > 3:
+                        feedback_parts.append(f"     ... and {len(style_violations) - 3} more")
+                
+                if feedback_parts:
+                    for part in feedback_parts:
+                        print(part)
+                else:
+                    print("  (No errors to report)")
+                print("  " + "-" * 56)
             
             try:
                 repair_response = generate_repair(
