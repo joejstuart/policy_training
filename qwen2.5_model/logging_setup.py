@@ -98,3 +98,4 @@ def get_logger(script_name: str) -> logging.Logger:
     """Get a logger with default settings."""
     return setup_logging(script_name)
 
+
