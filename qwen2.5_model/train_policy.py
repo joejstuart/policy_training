@@ -65,11 +65,12 @@ except ImportError:
 
 # PEFT is optional - support full fine-tuning if not available
 try:
-    from peft import LoraConfig, get_peft_model, TaskType
+    from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
     PEFT_AVAILABLE = True
 except ImportError:
     PEFT_AVAILABLE = False
     # Will log this after logger is set up
+    prepare_model_for_kbit_training = None
 
 # BitsAndBytes for 4-bit quantization (QLoRA)
 try:
@@ -400,8 +401,15 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
     return tokenizer, model
 
 
-def apply_lora(model, cfg, use_lora=True):
-    """Apply LoRA to the model, or return model as-is for full fine-tuning."""
+def apply_lora(model, cfg, use_lora=True, use_4bit=False):
+    """Apply LoRA to the model, or return model as-is for full fine-tuning.
+    
+    Args:
+        model: The base model
+        cfg: Training configuration
+        use_lora: Whether to use LoRA
+        use_4bit: Whether model is 4-bit quantized (needs special preparation)
+    """
     if not use_lora or not PEFT_AVAILABLE:
         logging.info("Using full fine-tuning (all parameters trainable)")
         # Count trainable parameters
@@ -410,6 +418,12 @@ def apply_lora(model, cfg, use_lora=True):
         logging.info(f"  Trainable parameters: {trainable_params:,} ({100 * trainable_params / total_params:.2f}%)")
         logging.info(f"  Total parameters: {total_params:,}")
         return model
+    
+    # For 4-bit quantized models, prepare for k-bit training
+    if use_4bit and prepare_model_for_kbit_training is not None:
+        logging.info("Preparing 4-bit quantized model for training...")
+        model = prepare_model_for_kbit_training(model)
+        logging.info("Model prepared for k-bit training")
     
     logging.info("Applying LoRA...")
     lora_config = LoraConfig(
@@ -433,6 +447,15 @@ def apply_lora(model, cfg, use_lora=True):
 
     lora_model = get_peft_model(model, lora_config)
     lora_model.print_trainable_parameters()
+    
+    # Verify that some parameters are trainable
+    trainable_params = sum(p.numel() for p in lora_model.parameters() if p.requires_grad)
+    if trainable_params == 0:
+        logging.error("ERROR: No trainable parameters found after applying LoRA!")
+        logging.error("This usually means LoRA wasn't applied correctly.")
+        raise RuntimeError("No trainable parameters - LoRA application failed")
+    
+    logging.info(f"✓ LoRA applied successfully - {trainable_params:,} trainable parameters")
     return lora_model
 
 
@@ -769,7 +792,7 @@ Examples:
     elif not PEFT_AVAILABLE:
         logger.info("PEFT not available: using full fine-tuning")
     
-    model = apply_lora(base_model, cfg, use_lora=use_lora)
+    model = apply_lora(base_model, cfg, use_lora=use_lora, use_4bit=cfg.use_4bit)
     
     # Create datasets (pre-tokenization happens here)
     logger.info("Creating datasets...")
