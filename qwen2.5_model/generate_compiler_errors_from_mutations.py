@@ -35,8 +35,22 @@ sys.path.insert(0, str(script_dir))
 try:
     from infer_policy import find_repo_root, find_attestation_files
 except ImportError:
-    print("Error: Could not import infer_policy")
-    sys.exit(1)
+    # Fallback: implement simple versions of these functions
+    def find_repo_root() -> Path:
+        """Find repository root by looking for policy/ directory."""
+        current = Path(__file__).resolve()
+        while current != current.parent:
+            if (current / "policy").exists():
+                return current
+            current = current.parent
+        return Path.cwd()
+    
+    def find_attestation_files(repo_root: Path, max_files: int = 5) -> List[Path]:
+        """Find attestation JSON files in the repository root."""
+        attestation_file = repo_root / "attestation.json"
+        if attestation_file.exists():
+            return [attestation_file]
+        return []
 
 
 def mutate_variable_redeclaration(code: str) -> List[str]:
@@ -73,7 +87,8 @@ def mutate_variable_redeclaration(code: str) -> List[str]:
         for name in common_names:
             if name != var_name and name in code.lower():
                 # Create mutation: change 'some X in Y' to 'some <name> in Y'
-                mutated = code[:match.start(1)] + name + code[match.end(1):match.end()]
+                # Replace just the variable name, keep rest of code
+                mutated = code[:match.start(1)] + name + code[match.end(1):]
                 # Also change references to var_name to name
                 mutated = re.sub(rf'\b{var_name}\.', f'{name}.', mutated)
                 mutations.append(mutated)
@@ -87,7 +102,7 @@ def mutate_variable_redeclaration(code: str) -> List[str]:
         var_name = first_match.group(1)
         
         # Change second iteration to use same variable
-        mutated = code[:second_match.start(1)] + var_name + code[second_match.end(1):second_match.end()]
+        mutated = code[:second_match.start(1)] + var_name + code[second_match.end(1):]
         mutations.append(mutated)
     
     return mutations
@@ -324,12 +339,16 @@ def normalize_error_json(error_json_str: str) -> str:
             for error in error_data["errors"]:
                 if "location" in error and "file" in error["location"]:
                     file_path = error["location"]["file"]
-                    if "/tmp/" in file_path or file_path.startswith("/tmp"):
+                    # Handle various temp file paths: /tmp/, /var/folders/, etc.
+                    if any(path in file_path for path in ["/tmp/", "/var/folders/", "tmp"]) or file_path.startswith("/tmp"):
                         error["location"]["file"] = "<temp_file>.rego"
         return json_lib.dumps(error_data, indent=2)
     except:
+        # Fallback: regex replacement for common temp file patterns
         normalized = re.sub(r'/tmp/tmp[a-zA-Z0-9_]+\.rego', '<temp_file>.rego', error_json_str)
         normalized = re.sub(r'/tmp/[^"]+\.rego', '<temp_file>.rego', normalized)
+        normalized = re.sub(r'/var/folders/[^"]+\.rego', '<temp_file>.rego', normalized)
+        normalized = re.sub(r'/[^"]*tmp[^"]*\.rego', '<temp_file>.rego', normalized)
         return normalized
 
 
@@ -350,11 +369,16 @@ def extract_correct_code_from_dataset(dataset_file: Path) -> List[Dict]:
             try:
                 data = json.loads(line.strip())
                 
-                # Extract from messages format
-                if "messages" in data:
-                    instruction = None
-                    correct_code = None
-                    
+                instruction = None
+                correct_code = None
+                
+                # Try direct format (instruction + output_code)
+                if "instruction" in data and "output_code" in data:
+                    instruction = data["instruction"]
+                    correct_code = data["output_code"]
+                
+                # Try messages format (chat format)
+                elif "messages" in data:
                     for msg in data["messages"]:
                         if msg.get("role") == "user":
                             content = msg.get("content", "")
@@ -373,8 +397,11 @@ def extract_correct_code_from_dataset(dataset_file: Path) -> List[Dict]:
                             elif "package" in content and ("deny" in content or "warn" in content):
                                 # Might be code without markdown
                                 correct_code = content.strip()
-                    
-                    if instruction and correct_code:
+                
+                # Validate we have both instruction and code
+                if instruction and correct_code:
+                    # Make sure code looks like Rego
+                    if "package" in correct_code or "deny" in correct_code or "warn" in correct_code:
                         examples.append({
                             "instruction": instruction,
                             "correct_code": correct_code

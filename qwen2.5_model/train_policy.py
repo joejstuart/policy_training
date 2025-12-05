@@ -71,6 +71,13 @@ except ImportError:
     PEFT_AVAILABLE = False
     # Will log this after logger is set up
 
+# BitsAndBytes for 4-bit quantization (QLoRA)
+try:
+    from transformers import BitsAndBytesConfig
+    BITSANDBYTES_AVAILABLE = True
+except ImportError:
+    BITSANDBYTES_AVAILABLE = False
+
 
 @dataclass
 class TrainingConfig:
@@ -91,6 +98,11 @@ class TrainingConfig:
     logging_steps: int = 10
     eval_steps: int = 50
     save_steps: int = 100
+    # QLoRA settings (for large models like Qwen3-Coder-30B)
+    use_4bit: bool = False  # Enable 4-bit quantization (QLoRA)
+    bnb_4bit_compute_dtype: str = "bfloat16"  # Compute dtype for 4-bit
+    bnb_4bit_quant_type: str = "nf4"  # Quantization type
+    bnb_4bit_use_double_quant: bool = True  # Double quantization
 
 
 QWEN_SYSTEM_PROMPT_POLICY = (
@@ -284,7 +296,31 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
         device_name = "CPU"
     
     logging.info(f"Using device: {device_name}")
+    
+    # Check if 4-bit quantization is requested
+    use_4bit = getattr(cfg, 'use_4bit', False)
+    if use_4bit:
+        if device.type != "cuda":
+            logging.warning("4-bit quantization requires CUDA. Disabling quantization.")
+            use_4bit = False
+        elif not BITSANDBYTES_AVAILABLE:
+            logging.warning("BitsAndBytes not available. Install with: pip install bitsandbytes")
+            logging.warning("Disabling 4-bit quantization.")
+            use_4bit = False
+    
     dtype = torch.bfloat16  # Qwen prefers bf16/fp16
+    if use_4bit:
+        # For 4-bit, we'll use BitsAndBytesConfig
+        compute_dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }
+        compute_dtype = compute_dtype_map.get(
+            getattr(cfg, 'bnb_4bit_compute_dtype', 'bfloat16'),
+            torch.bfloat16
+        )
+        logging.info(f"Using 4-bit quantization (QLoRA) with compute dtype: {compute_dtype}")
 
     logging.info(f"Loading tokenizer from {cfg.model_name}...")
     try:
@@ -311,12 +347,31 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
     logging.info(f"Loading model from {cfg.model_name}...")
     try:
         device_map_value = str(device) if device.type != "cpu" else "cpu"
-        model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_name,
-            torch_dtype=dtype,
-            device_map={"": device_map_value} if device.type != "cpu" else None,
-            trust_remote_code=True,
-        )
+        
+        # Configure quantization if requested
+        quantization_config = None
+        if use_4bit:
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type=getattr(cfg, 'bnb_4bit_quant_type', 'nf4'),
+                bnb_4bit_compute_dtype=compute_dtype,
+                bnb_4bit_use_double_quant=getattr(cfg, 'bnb_4bit_use_double_quant', True),
+            )
+            logging.info("Using 4-bit quantization (QLoRA)")
+            # For 4-bit, don't set torch_dtype (quantization handles it)
+            model = AutoModelForCausalLM.from_pretrained(
+                cfg.model_name,
+                quantization_config=quantization_config,
+                device_map="auto" if device.type == "cuda" else None,
+                trust_remote_code=True,
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                cfg.model_name,
+                torch_dtype=dtype,
+                device_map={"": device_map_value} if device.type != "cpu" else None,
+                trust_remote_code=True,
+            )
     except Exception as e:
         logging.error(f"Error loading model: {e}")
         logging.error("\nPossible solutions:")
@@ -621,6 +676,11 @@ Examples:
         help="Evaluation strategy (default: 'steps')",
     )
     parser.add_argument(
+        "--use-4bit",
+        action="store_true",
+        help="Use 4-bit quantization (QLoRA) - required for large models like Qwen3-Coder-30B. Requires CUDA and bitsandbytes.",
+    )
+    parser.add_argument(
         "--no-lora",
         action="store_true",
         help="Disable LoRA and use full fine-tuning (required if PEFT not available)",
@@ -678,6 +738,7 @@ Examples:
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
         warmup_steps=args.warmup_steps,
+        use_4bit=getattr(args, 'use_4bit', False),
     )
     
     # Validate paths
