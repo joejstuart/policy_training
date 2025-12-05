@@ -361,12 +361,24 @@ def load_qwen_model(cfg, enable_gradient_checkpointing=True):
                 bnb_4bit_use_double_quant=getattr(cfg, 'bnb_4bit_use_double_quant', True),
             )
             logging.info("Using 4-bit quantization (QLoRA)")
+            
+            # Try to use Flash Attention 2 if available (saves memory and is faster)
+            attn_implementation = "auto"
+            try:
+                import flash_attn
+                attn_implementation = "flash_attention_2"
+                logging.info("Flash Attention 2 available - using for memory efficiency")
+            except ImportError:
+                logging.info("Flash Attention 2 not available (optional - install with: pip install flash-attn)")
+                attn_implementation = "sdpa"  # Use SDPA (scaled dot product attention) as fallback
+            
             # For 4-bit, don't set torch_dtype (quantization handles it)
             model = AutoModelForCausalLM.from_pretrained(
                 cfg.model_name,
                 quantization_config=quantization_config,
                 device_map="auto" if device.type == "cuda" else None,
                 trust_remote_code=True,
+                attn_implementation=attn_implementation,
             )
         else:
             model = AutoModelForCausalLM.from_pretrained(
@@ -513,10 +525,16 @@ def train_with_trainer(model, tokenizer, train_dataset, eval_dataset, cfg,
         ddp_find_unused_parameters=False,  # Save memory in DDP mode
         remove_unused_columns=False,  # Keep all columns (needed for our dataset)
         
+        # Memory-efficient settings
+        include_inputs_for_metrics=False,  # Don't store inputs for metrics (saves memory)
+        prediction_loss_only=True,  # Only compute loss, not full predictions (saves memory)
+        
         # MPS-specific optimizations
         dataloader_prefetch_factor=None,  # Let PyTorch decide for MPS
         
         # Optimizer
+        # Note: 8-bit optimizers require special setup and may not work with all transformers versions
+        # Using standard optimizer for now - can be optimized later if needed
         optim="adamw_torch",
         adam_beta1=0.9,
         adam_beta2=0.999,
