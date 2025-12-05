@@ -11,10 +11,14 @@ This script:
 
 Usage:
     # Extract instructions from existing dataset
-    python collect_compiler_errors.py --source-dataset attestation_train.jsonl --output data/compiler_errors/collected.jsonl
+    python collect_compiler_errors.py --source-dataset attestation_train.jsonl --output data/compiler_errors/collected_from_dataset.jsonl
 
     # Use instruction file
-    python collect_compiler_errors.py --instructions-file instructions.txt --output data/compiler_errors/collected.jsonl
+    python collect_compiler_errors.py --instructions-file instructions.txt --output data/compiler_errors/collected_from_file.jsonl
+
+    # Use same output file to combine results (file opens in append mode)
+    python collect_compiler_errors.py --source-dataset attestation_train.jsonl --output data/compiler_errors/collected.jsonl
+    python collect_compiler_errors.py --instructions-file instructions.txt --output data/compiler_errors/collected.jsonl  # Appends to same file
 
     # Test mode (small subset first)
     python collect_compiler_errors.py --test --instructions-file instructions.txt
@@ -388,6 +392,9 @@ def collect_compiler_errors(
                                 error_category = "syntax_error"
                             
                             # Save error example
+                            # If syntax is invalid, execution can't be valid
+                            execution_valid = state.execution_valid if state.syntax_valid else False
+                            
                             example = {
                                 "instruction": instruction,
                                 "incorrect_code": final_code,
@@ -398,7 +405,7 @@ def collect_compiler_errors(
                                 "model_version": "current",  # Could be enhanced
                                 "iteration": state.iteration,
                                 "syntax_valid": state.syntax_valid,
-                                "execution_valid": state.execution_valid,
+                                "execution_valid": execution_valid,
                             }
                             
                             output_fp.write(json.dumps(example) + "\n")
