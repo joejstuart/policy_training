@@ -560,7 +560,7 @@ def generate_response(tokenizer, model, device, messages, max_tokens=512, temper
 
 def interactive_chat(
     tokenizer, model, device, builder=None, default_package=None, 
-    validate=True, max_corrections=3, include_style_guide=False, 
+    validate=True, max_corrections=5, include_style_guide=False, 
     enhance_instruction=True, agentic=True, verbose=True,
     include_execution_check=True, attestation_files=None, include_planning=True
 ):
@@ -764,7 +764,7 @@ def interactive_chat(
 def single_inference(
     tokenizer, model, device, instruction, 
     context=None, builder=None, package=None, max_tokens=1024,
-    validate=True, max_corrections=3, include_style_guide=False, 
+    validate=True, max_corrections=5, include_style_guide=False, 
     enhance_instruction=True, agentic=True, verbose=True,
     include_execution_check=True, attestation_files=None, include_planning=True
 ):
