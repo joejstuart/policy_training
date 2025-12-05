@@ -543,7 +543,6 @@ def train_with_trainer(model, tokenizer, train_dataset, eval_dataset, cfg,
         
         # Other settings
         report_to="none",
-        remove_unused_columns=False,
     )
     
     # Create dynamic padding collator
