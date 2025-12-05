@@ -1740,139 +1740,108 @@ def generate_repair(
 ) -> str:
     """Generate a repair for the code based on validation results.
     
-    Prioritizes fixes:
-    1. Syntax errors (must fix)
-    2. Execution errors (should fix)
-    3. Style violations (nice to fix)
+    Uses the format the model was trained on for error correction:
+    
+    Error: [error_code] error message (line X, column Y)
+    Error type: type
+    
+    Instruction: <original instruction>
+    
+    The following Rego code has compilation errors:
+    ```rego
+    <broken code>
+    ```
+    
+    Please fix the compilation errors and provide the corrected code.
     """
     import json
+    import re
     
-    # Build structured error feedback
-    feedback_sections = []
+    # Build error string in training data format
+    error_lines = []
+    error_type = "unknown"
     
-    # 1. SYNTAX ERRORS (Highest Priority)
+    # 1. SYNTAX ERRORS - format exactly like training data
     if not validation_results["syntax"]["valid"]:
         error_msg = validation_results["syntax"]["error_msg"]
         
         # Try to parse JSON error format
-        parsed_error = None
         try:
             error_data = json.loads(error_msg)
             if isinstance(error_data, dict) and "errors" in error_data:
-                parsed_error = error_data["errors"][0] if error_data["errors"] else None
-        except:
-            pass
-        
-        syntax_feedback = "❌ SYNTAX ERROR (MUST FIX):\n"
-        
-        if parsed_error:
-            msg = parsed_error.get("message", "")
-            location = parsed_error.get("location", {})
-            row = location.get("row", "")
-            col = location.get("col", "")
-            
-            syntax_feedback += f"Error: {msg}\n"
-            if row:
-                syntax_feedback += f"Location: Line {row}, Column {col}\n"
-            
-            # Provide specific guidance based on error type
-            if "non-terminated string" in msg or "unexpected" in msg.lower():
-                syntax_feedback += "\nCommon causes:\n"
-                syntax_feedback += "- Using invalid Rego keywords: 'rule', 'match', 'then', 'for', 'break'\n"
-                syntax_feedback += "- Missing or mismatched braces { }\n"
-                syntax_feedback += "- Invalid string delimiters\n"
-        else:
-            # Fallback for non-JSON errors
-            syntax_feedback += f"{error_msg[:300]}\n"
-            if "non-terminated string" in error_msg:
-                syntax_feedback += "\nThis often indicates invalid Rego syntax keywords.\n"
-        
-        syntax_feedback += "\n✅ CORRECT REGO SYNTAX:\n"
-        syntax_feedback += "- Use 'deny contains result if { ... }' for deny rules\n"
-        syntax_feedback += "- Use 'warn contains result if { ... }' for warnings\n"
-        syntax_feedback += "- Use 'every item in collection { condition }' for FOR ALL checks\n"
-        syntax_feedback += "- Use helper rules: 'rule_name if { ... }'\n"
-        syntax_feedback += "- DO NOT use: 'rule', 'match', 'then', 'for', 'break'\n"
-        
-        feedback_sections.append(syntax_feedback)
+                for err in error_data["errors"]:
+                    code = err.get("code", "rego_error")
+                    msg = err.get("message", "")
+                    location = err.get("location", {})
+                    row = location.get("row", "")
+                    col = location.get("col", "")
+                    
+                    if row and col:
+                        error_lines.append(f"[{code}] {msg} (line {row}, column {col})")
+                    elif row:
+                        error_lines.append(f"[{code}] {msg} (line {row})")
+                    else:
+                        error_lines.append(f"[{code}] {msg}")
+                    
+                    # Determine error type from code
+                    if "parse" in code:
+                        error_type = "parse_error"
+                    elif "unsafe" in code or "type" in code:
+                        error_type = "type_error"
+                    elif "compile" in code:
+                        error_type = "compile_error"
+        except (json.JSONDecodeError, KeyError, TypeError):
+            # Not JSON, try to extract from raw error message
+            error_lines.append(error_msg[:300])
+            error_type = "syntax_error"
     
-    # 2. EXECUTION ERRORS (Medium Priority)
+    # 2. EXECUTION ERRORS - format like training data
     if not validation_results["execution"]["valid"]:
         exec_errors = validation_results["execution"]["errors"]
-        exec_feedback = "⚠️ EXECUTION ERRORS (SHOULD FIX):\n"
-        exec_feedback += "The code failed when tested against real attestation data:\n\n"
-        for i, err in enumerate(exec_errors[:5], 1):  # Limit to 5 errors
-            exec_feedback += f"{i}. {err}\n"
-        if len(exec_errors) > 5:
-            exec_feedback += f"... and {len(exec_errors) - 5} more errors\n"
-        feedback_sections.append(exec_feedback)
+        for err in exec_errors[:5]:
+            # Extract error code and message from execution error
+            # Format: "file.json: Query 'data.deny' failed: [rego_unsafe_var_error] var result is unsafe (line 5, col 1)"
+            match = re.search(r'\[(\w+)\]\s*(.+?)(?:\s*\(line\s*(\d+)(?:,\s*col(?:umn)?\s*(\d+))?\))?$', err)
+            if match:
+                code = match.group(1)
+                msg = match.group(2).strip()
+                row = match.group(3)
+                col = match.group(4)
+                
+                if row and col:
+                    error_lines.append(f"[{code}] {msg} (line {row}, column {col})")
+                elif row:
+                    error_lines.append(f"[{code}] {msg} (line {row})")
+                else:
+                    error_lines.append(f"[{code}] {msg}")
+                
+                # Update error type
+                if "unsafe" in code:
+                    error_type = "type_error"
+                elif "compile" in code:
+                    error_type = "compile_error"
+            else:
+                # Fallback: include the full error
+                error_lines.append(err)
     
-    # 3. STYLE VIOLATIONS (Low Priority)
-    if not validation_results["style"]["valid"]:
-        style_violations = validation_results["style"]["violations"]
-        style_feedback = "💡 STYLE VIOLATIONS (NICE TO FIX):\n"
-        style_feedback += "Style guide recommendations:\n\n"
-        for i, violation in enumerate(style_violations[:3], 1):  # Limit to 3
-            style_feedback += f"{i}. {violation}\n"
-        if len(style_violations) > 3:
-            style_feedback += f"... and {len(style_violations) - 3} more\n"
-        feedback_sections.append(style_feedback)
+    # Format errors exactly like training data
+    if len(error_lines) == 1:
+        error_string = f"Error: {error_lines[0]}"
+    else:
+        error_string = "Error: " + "\n".join(f"{i}. {e}" for i, e in enumerate(error_lines, 1))
     
-    # Combine all feedback sections
-    validation_feedback = "\n\n".join(feedback_sections) if feedback_sections else "No validation errors found."
-    
-    repair_prompt = f"""The generated Rego code has validation errors. You MUST fix them.
+    # Build the repair prompt in EXACT training data format
+    repair_prompt = f"""{error_string}
+Error type: {error_type}
 
-Original instruction:
-{instruction}
+Instruction: {instruction}
 
-Original plan:
-{plan}
-
-Current code (iteration {iteration}/{max_iterations}) - THIS CODE IS BROKEN:
+The following Rego code has compilation errors:
 ```rego
 {current_code}
 ```
 
-VALIDATION FEEDBACK (prioritized by importance):
-{validation_feedback}
-
-IMPORTANT: Rego syntax rules:
-- Use 'deny contains result if { ... }' or 'warn contains result if { ... }' for policy rules
-- Use 'every item in collection {{ condition }}' for "for all" checks
-- Use helper rules like 'rule_name if {{ ... }}' for reusable logic
-- DO NOT use: 'rule', 'match', 'then', 'for', 'break' - these are NOT valid Rego
-
-Examples:
-
-For "check if all tasks succeeded" (keyword: 'task'):
-```rego
-deny contains result if {{
-    some att in input.attestations
-    some task in att.statement.predicate.buildConfig.tasks
-    task.status != "Succeeded"
-    result := {{"msg": sprintf("task %q did not succeed", [task.name])}}
-}}
-```
-
-For "check materials for digest" (keyword: 'material'):
-```rego
-deny contains result if {{
-    some material in input.predicate.materials
-    material.digest.sha256 == "1234"
-    result := {{"msg": sprintf("material %q has sha256 1234", [material.uri])}}
-}}
-```
-
-IMPORTANT: Match the instruction keyword to the correct path - don't assume everything is about tasks!
-
-Please provide ONLY the corrected Rego code in a code block (```rego ... ```) that fixes ALL syntax errors.
-The code MUST be valid Rego syntax - no 'rule', 'match', 'then', 'for', or 'break' keywords.
-
-Output format:
-```rego
-[your corrected code here]
-```"""
+Please fix the compilation errors and provide the corrected code."""
     
     # Detect task type for system prompt
     is_attestation_task = any(kw in instruction.lower() for kw in [
@@ -1880,10 +1849,9 @@ Output format:
     ])
     system_prompt = QWEN_SYSTEM_PROMPT_ATTESTATION if is_attestation_task else QWEN_SYSTEM_PROMPT
     
+    # Single-turn format matching training data structure
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Instruction: {instruction}\n\nPlan: {plan}"},
-        {"role": "assistant", "content": f"```rego\n{current_code}\n```"},
         {"role": "user", "content": repair_prompt}
     ]
     
@@ -2246,52 +2214,71 @@ def agentic_inference(
         if state.iteration < max_iterations:
             if verbose:
                 print("  🔧 Phase 5: Repairing...")
-                # Show what error messages are being sent to the model
-                print("  Error messages being sent to model:")
+                # Show the prompt being sent to the model (matches training data format)
+                print("  Repair prompt (training data format):")
                 print("  " + "-" * 56)
                 
-                # Build the same validation feedback that will be sent
+                # Build preview of the repair prompt in training format
                 import json
-                feedback_parts = []
+                import re as re_module
+                error_lines = []
+                error_type = "unknown"
                 
+                # Syntax errors
                 if not validation_results["syntax"]["valid"]:
                     error_msg = validation_results["syntax"]["error_msg"]
                     try:
                         error_data = json.loads(error_msg)
                         if isinstance(error_data, dict) and "errors" in error_data:
-                            parsed_error = error_data["errors"][0] if error_data["errors"] else None
-                            if parsed_error:
-                                msg = parsed_error.get("message", "")
-                                location = parsed_error.get("location", {})
+                            for err in error_data["errors"]:
+                                err_code = err.get("code", "rego_error")
+                                msg = err.get("message", "")
+                                location = err.get("location", {})
                                 row = location.get("row", "")
                                 col = location.get("col", "")
-                                feedback_parts.append(f"  ❌ SYNTAX ERROR: {msg}")
-                                if row:
-                                    feedback_parts.append(f"     Location: Line {row}, Column {col}")
+                                if row and col:
+                                    error_lines.append(f"[{err_code}] {msg} (line {row}, column {col})")
+                                elif row:
+                                    error_lines.append(f"[{err_code}] {msg} (line {row})")
+                                else:
+                                    error_lines.append(f"[{err_code}] {msg}")
+                                if "parse" in err_code:
+                                    error_type = "parse_error"
+                                elif "unsafe" in err_code or "type" in err_code:
+                                    error_type = "type_error"
                     except:
-                        feedback_parts.append(f"  ❌ SYNTAX ERROR: {error_msg[:200]}")
+                        error_lines.append(error_msg[:200])
                 
+                # Execution errors
                 if not validation_results["execution"]["valid"]:
                     exec_errors = validation_results["execution"]["errors"]
-                    feedback_parts.append(f"  ⚠️ EXECUTION ERRORS ({len(exec_errors)} error(s)):")
-                    for i, err in enumerate(exec_errors[:3], 1):
-                        feedback_parts.append(f"     {i}. {err}")
-                    if len(exec_errors) > 3:
-                        feedback_parts.append(f"     ... and {len(exec_errors) - 3} more")
+                    for err in exec_errors[:3]:
+                        match = re_module.search(r'\[(\w+)\]\s*(.+?)(?:\s*\(line\s*(\d+)(?:,\s*col(?:umn)?\s*(\d+))?\))?$', err)
+                        if match:
+                            err_code = match.group(1)
+                            msg = match.group(2).strip()
+                            row = match.group(3)
+                            col = match.group(4)
+                            if row and col:
+                                error_lines.append(f"[{err_code}] {msg} (line {row}, column {col})")
+                            elif row:
+                                error_lines.append(f"[{err_code}] {msg} (line {row})")
+                            else:
+                                error_lines.append(f"[{err_code}] {msg}")
+                            if "unsafe" in err_code:
+                                error_type = "type_error"
+                        else:
+                            error_lines.append(err)
                 
-                if not validation_results["style"]["valid"]:
-                    style_violations = validation_results["style"]["violations"]
-                    feedback_parts.append(f"  💡 STYLE VIOLATIONS ({len(style_violations)} violation(s)):")
-                    for i, violation in enumerate(style_violations[:3], 1):
-                        feedback_parts.append(f"     {i}. {violation}")
-                    if len(style_violations) > 3:
-                        feedback_parts.append(f"     ... and {len(style_violations) - 3} more")
-                
-                if feedback_parts:
-                    for part in feedback_parts:
-                        print(part)
+                # Show the formatted prompt
+                if len(error_lines) == 1:
+                    print(f"  Error: {error_lines[0]}")
                 else:
-                    print("  (No errors to report)")
+                    print("  Error: " + "\n  ".join(f"{i}. {e}" for i, e in enumerate(error_lines, 1)))
+                print(f"  Error type: {error_type}")
+                print(f"  Instruction: {instruction[:100]}..." if len(instruction) > 100 else f"  Instruction: {instruction}")
+                print("  [broken code block]")
+                print("  Please fix the compilation errors and provide the corrected code.")
                 print("  " + "-" * 56)
             
             try:
