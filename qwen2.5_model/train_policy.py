@@ -17,9 +17,11 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 if "CUDA_VISIBLE_DEVICES" not in os.environ:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # Use first GPU by default
 
-# Disable CUDA memory pool issues
+# Disable CUDA memory pool issues and reduce fragmentation
 if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+    # Use expandable_segments to reduce memory fragmentation
+    # This helps with large models and QLoRA
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import argparse
 import json
@@ -426,12 +428,21 @@ def apply_lora(model, cfg, use_lora=True, use_4bit=False):
         logging.info("Model prepared for k-bit training")
     
     logging.info("Applying LoRA...")
-    lora_config = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=cfg.lora_r,
-        lora_alpha=cfg.lora_alpha,
-        lora_dropout=cfg.lora_dropout,
-        target_modules=[
+    
+    # For 4-bit quantized models, use only attention layers to save memory
+    # MLP layers can be added if memory allows
+    if use_4bit:
+        # Memory-optimized: only attention layers
+        target_modules = [
+            "q_proj",
+            "k_proj", 
+            "v_proj",
+            "o_proj",
+        ]
+        logging.info("Using memory-optimized LoRA (attention layers only)")
+    else:
+        # Full LoRA: attention + MLP layers
+        target_modules = [
             # Attention layers
             "q_proj",
             "k_proj", 
@@ -441,7 +452,15 @@ def apply_lora(model, cfg, use_lora=True, use_4bit=False):
             "gate_proj",
             "up_proj",
             "down_proj",
-        ],
+        ]
+        logging.info("Using full LoRA (attention + MLP layers)")
+    
+    lora_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=cfg.lora_r,
+        lora_alpha=cfg.lora_alpha,
+        lora_dropout=cfg.lora_dropout,
+        target_modules=target_modules,
         bias="none",
     )
 
@@ -463,11 +482,16 @@ def train_with_trainer(model, tokenizer, train_dataset, eval_dataset, cfg,
                        disable_gradient_checkpointing=False, 
                        dataloader_num_workers=0, eval_strategy="steps"):
     """Train the model using HuggingFace Trainer."""
+    # For 4-bit quantized models, use smaller eval batch size to save memory
+    eval_batch_size = cfg.batch_size
+    if getattr(cfg, 'use_4bit', False):
+        eval_batch_size = min(cfg.batch_size, 1)  # Eval with batch size 1 for 4-bit
+    
     training_args = TrainingArguments(
         output_dir=cfg.output_dir,
         num_train_epochs=cfg.num_epochs,
         per_device_train_batch_size=cfg.batch_size,
-        per_device_eval_batch_size=cfg.batch_size,
+        per_device_eval_batch_size=eval_batch_size,  # Smaller for memory
         gradient_accumulation_steps=cfg.grad_accum_steps,
         learning_rate=cfg.learning_rate,
         
@@ -484,6 +508,10 @@ def train_with_trainer(model, tokenizer, train_dataset, eval_dataset, cfg,
         # Performance optimizations
         dataloader_drop_last=True,
         max_grad_norm=1.0,
+        
+        # Additional memory optimizations for large models
+        ddp_find_unused_parameters=False,  # Save memory in DDP mode
+        remove_unused_columns=False,  # Keep all columns (needed for our dataset)
         
         # MPS-specific optimizations
         dataloader_prefetch_factor=None,  # Let PyTorch decide for MPS
