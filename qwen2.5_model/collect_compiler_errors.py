@@ -13,15 +13,23 @@ Usage:
     # Extract instructions from existing dataset
     python collect_compiler_errors.py --source-dataset attestation_train.jsonl --output data/compiler_errors/collected_from_dataset.jsonl
 
+    # Stop after collecting 200 errors (recommended for initial training)
+    python collect_compiler_errors.py --source-dataset attestation_train.jsonl --output data/compiler_errors/collected.jsonl --max-errors 200
+
+    # Collect 500 errors for more robust training
+    python collect_compiler_errors.py --source-dataset attestation_train.jsonl --output data/compiler_errors/collected.jsonl --max-errors 500
+
     # Use instruction file
     python collect_compiler_errors.py --instructions-file instructions.txt --output data/compiler_errors/collected_from_file.jsonl
 
-    # Use same output file to combine results (file opens in append mode)
-    python collect_compiler_errors.py --source-dataset attestation_train.jsonl --output data/compiler_errors/collected.jsonl
-    python collect_compiler_errors.py --instructions-file instructions.txt --output data/compiler_errors/collected.jsonl  # Appends to same file
-
     # Test mode (small subset first)
     python collect_compiler_errors.py --test --instructions-file instructions.txt
+
+How many errors do you need?
+    - 100-200: Good starting point for initial fine-tuning
+    - 300-500: Better coverage, more robust training
+    - 1000+: Diminishing returns, but more diversity
+    - Current run (1776): More than needed, but good for diversity
 """
 
 import os
@@ -282,6 +290,49 @@ def get_opa_error_json(code: str, attestation_file: Path, package: str = "attest
     return None  # Code compiles and executes
 
 
+def normalize_error_json(error_json_str: str) -> str:
+    """Normalize error JSON by replacing temp file paths with placeholders.
+    
+    This ensures training data doesn't include variable temp file paths that
+    would confuse the model.
+    
+    Args:
+        error_json_str: Error JSON string from OPA
+        
+    Returns:
+        Normalized error JSON string with temp paths replaced
+    """
+    import json as json_lib
+    import re
+    
+    try:
+        # Parse JSON
+        error_data = json_lib.loads(error_json_str)
+        
+        # Normalize file paths in errors
+        if isinstance(error_data, dict) and "errors" in error_data:
+            for error in error_data["errors"]:
+                if "location" in error and "file" in error["location"]:
+                    file_path = error["location"]["file"]
+                    # Replace temp file paths with placeholder
+                    if "/tmp/" in file_path or file_path.startswith("/tmp"):
+                        # Extract just the filename or use a placeholder
+                        filename = Path(file_path).name
+                        if filename.startswith("tmp") or filename.startswith("rego_"):
+                            error["location"]["file"] = "<temp_file>.rego"
+                        else:
+                            error["location"]["file"] = filename
+        
+        # Return normalized JSON
+        return json_lib.dumps(error_data, indent=2)
+    except (json_lib.JSONDecodeError, KeyError, TypeError):
+        # If parsing fails, try simple string replacement
+        # Replace common temp file patterns
+        normalized = re.sub(r'/tmp/tmp[a-zA-Z0-9_]+\.rego', '<temp_file>.rego', error_json_str)
+        normalized = re.sub(r'/tmp/[^"]+\.rego', '<temp_file>.rego', normalized)
+        return normalized
+
+
 def collect_compiler_errors(
     instructions: List[str],
     tokenizer,
@@ -291,6 +342,7 @@ def collect_compiler_errors(
     output_file: Path,
     test_mode: bool = False,
     max_instructions: Optional[int] = None,
+    max_errors: Optional[int] = None,
     checkpoint_file: Optional[Path] = None
 ) -> Dict[str, int]:
     """Collect compiler errors from inference runs.
@@ -347,6 +399,10 @@ def collect_compiler_errors(
     
     try:
         for i, instruction in enumerate(instructions, 1):
+            # Check if we've reached max_errors limit (before processing)
+            if max_errors and stats['compiler_errors'] >= max_errors:
+                print(f"\n✓ Already have {stats['compiler_errors']} compiler errors (target: {max_errors}). Stopping.")
+                break
             # Skip if already processed
             if instruction in processed_instructions:
                 continue
@@ -395,10 +451,13 @@ def collect_compiler_errors(
                             # If syntax is invalid, execution can't be valid
                             execution_valid = state.execution_valid if state.syntax_valid else False
                             
+                            # Normalize error JSON (replace temp file paths)
+                            normalized_error_json = normalize_error_json(opa_error)
+                            
                             example = {
                                 "instruction": instruction,
                                 "incorrect_code": final_code,
-                                "error_json": opa_error,
+                                "error_json": normalized_error_json,
                                 "error_category": error_category,
                                 "attestation_file": str(attestation_file.name),
                                 "timestamp": datetime.utcnow().isoformat(),
@@ -411,7 +470,12 @@ def collect_compiler_errors(
                             output_fp.write(json.dumps(example) + "\n")
                             output_fp.flush()
                             
-                            print(f"  ✓ Compiler error captured ({error_category})")
+                            print(f"  ✓ Compiler error captured ({error_category}) [{stats['compiler_errors']} total]")
+                            
+                            # Check if we've reached max_errors limit
+                            if max_errors and stats['compiler_errors'] >= max_errors:
+                                print(f"\n✓ Reached target of {max_errors} compiler errors. Stopping collection.")
+                                break
                         else:
                             stats["other_errors"] += 1
                             print(f"  - Other error (not compiler error)")
@@ -507,6 +571,12 @@ def main():
     )
     
     parser.add_argument(
+        "--max-errors",
+        type=int,
+        help="Stop after collecting this many compiler errors (recommended: 200-500 for initial training)"
+    )
+    
+    parser.add_argument(
         "--checkpoint",
         type=str,
         help="Checkpoint file for resume (default: <output>.checkpoint.json)"
@@ -587,6 +657,8 @@ def main():
     print("=" * 60)
     print(f"Output: {output_file}")
     print(f"Checkpoint: {checkpoint_file}")
+    if args.max_errors:
+        print(f"Target: {args.max_errors} compiler errors (will stop when reached)")
     print()
     
     stats = collect_compiler_errors(
@@ -598,6 +670,7 @@ def main():
         output_file,
         test_mode=args.test,
         max_instructions=args.max_instructions,
+        max_errors=args.max_errors,
         checkpoint_file=checkpoint_file
     )
     
