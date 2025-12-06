@@ -465,12 +465,16 @@ import rego.v1
     
     @staticmethod
     def generate_get_task_results(task_name: str) -> str:
-        """Generate Rego code to get results from a task."""
-        code = f"""task_results := [result |
+        """Generate Rego code to get results from a task.
+        
+        Note: Uses 'r' instead of 'result' to avoid variable shadowing conflicts
+        when this pattern is used inside 'deny contains result if {...}' rules.
+        """
+        code = f"""task_results := [r |
     some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.name == "{task_name}"
-    some result in task.results
+    some r in task.results
 ]"""
         return RegoCodeGenerator._wrap_in_rule(code, "task_results", RegoCodeGenerator.USE_FULL_RULES)
     
@@ -636,6 +640,43 @@ deny contains result if {{
         return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
     
     @staticmethod
+    def generate_deny_task_result_value(task_name: str, result_name: str, expected_value: str) -> str:
+        """Generate Rego deny rule that checks a specific result value.
+        
+        Note: Uses 'r' instead of 'result' to avoid variable shadowing with 'deny contains result'.
+        """
+        code = f"""deny contains result if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    some r in task.results
+    r.name == "{result_name}"
+    r.value == "{expected_value}"
+    result := {{"msg": sprintf("task %q result %q has value %q", [task.name, r.name, r.value])}}
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
+    
+    @staticmethod
+    def generate_deny_task_missing_result(task_name: str, result_name: str) -> str:
+        """Generate Rego deny rule that checks if a task is missing a required result.
+        
+        Note: Uses 'r' instead of 'result' to avoid variable shadowing with 'deny contains result'.
+        """
+        code = f"""deny contains result if {{
+    some att in input.attestations
+    some task in att.statement.predicate.buildConfig.tasks
+    task.name == "{task_name}"
+    not task_has_result(task, "{result_name}")
+    result := {{"msg": sprintf("task %q is missing required result %q", [task.name, "{result_name}"])}}
+}}
+
+task_has_result(task, name) if {{
+    some r in task.results
+    r.name == name
+}}"""
+        return RegoCodeGenerator._wrap_in_rule(code, "deny", RegoCodeGenerator.USE_FULL_RULES, use_deny=True)
+    
+    @staticmethod
     def generate_valid_task_status(task_name: str, valid_statuses: List[str]) -> str:
         """Generate Rego code using 'in' for membership check (style guide pattern)."""
         status_set = "{" + ", ".join(f'"{s}"' for s in valid_statuses) + "}"
@@ -762,26 +803,32 @@ bundle_ref := ref if {{
     
     @staticmethod
     def generate_get_result_names(task_name: str) -> str:
-        """Generate Rego code to return the names of all result keys for a task."""
-        code = f"""result_names := {{result.name |
+        """Generate Rego code to return the names of all result keys for a task.
+        
+        Note: Uses 'r' instead of 'result' to avoid variable shadowing conflicts.
+        """
+        code = f"""result_names := {{r.name |
     some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.name == "{task_name}"
-    some result in task.results
+    some r in task.results
 }}"""
         return RegoCodeGenerator._wrap_in_rule(code, "result_names", RegoCodeGenerator.USE_FULL_RULES)
     
     @staticmethod
     def generate_get_result_by_name(task_name: str, result_name: str) -> str:
-        """Generate Rego code to get a specific result value by name (e.g., exitCode)."""
+        """Generate Rego code to get a specific result value by name (e.g., exitCode).
+        
+        Note: Uses 'r' instead of 'result' to avoid variable shadowing conflicts.
+        """
         rule_name = f"{task_name.replace('-', '_')}_{result_name.replace('-', '_')}"
         code = f"""{rule_name} := value if {{
     some att in input.attestations
     some task in att.statement.predicate.buildConfig.tasks
     task.name == "{task_name}"
-    some result in task.results
-    result.name == "{result_name}"
-    value := result.value
+    some r in task.results
+    r.name == "{result_name}"
+    value := r.value
 }}"""
         return RegoCodeGenerator._wrap_in_rule(code, rule_name, RegoCodeGenerator.USE_FULL_RULES)
 
@@ -1572,6 +1619,841 @@ class InstructionGenerator:
         return examples
 
 
+@dataclass
+class PolicyRule:
+    """A policy rule extracted from a Rego file."""
+    package: str
+    package_title: str  # Title from package-level METADATA
+    package_description: str  # Description from package-level METADATA
+    title: str
+    description: str
+    short_name: str
+    failure_msg: str
+    solution: str
+    rule_type: str  # "deny" or "warn"
+    rule_code: str  # The actual rule code
+    full_code: str  # Full code including package, imports, and helpers
+    source_file: str
+    collections: List[str] = None
+    depends_on: List[str] = None
+    effective_on: str = None
+    imports_used: List[str] = None
+    helpers_used: List[str] = None
+
+
+class PolicyRuleParser:
+    """Parses Rego policy files to extract rules and metadata."""
+    
+    def __init__(self, policy_dir: Path):
+        self.policy_dir = policy_dir
+        self.logger = logging.getLogger(__name__)
+    
+    def parse_file(self, rego_file: Path) -> List[PolicyRule]:
+        """Parse a single Rego file and extract all rules with metadata."""
+        rules = []
+        
+        try:
+            content = rego_file.read_text()
+        except Exception as e:
+            self.logger.warning(f"Failed to read {rego_file}: {e}")
+            return rules
+        
+        # Skip test files
+        if rego_file.name.endswith("_test.rego"):
+            return rules
+        
+        # Extract package name
+        package_match = re.search(r'^package\s+(\S+)', content, re.MULTILINE)
+        if not package_match:
+            return rules
+        package = package_match.group(1)
+        
+        # Extract package-level metadata (first METADATA block before any rule)
+        pkg_metadata = self._extract_package_metadata(content)
+        
+        # Extract imports
+        imports = re.findall(r'^import\s+.+$', content, re.MULTILINE)
+        
+        # Find all deny/warn rules with their preceding METADATA blocks
+        rules_data = self._extract_rules_with_metadata(content)
+        
+        for rule_data in rules_data:
+            metadata = rule_data['metadata']
+            rule_code = rule_data['rule_code']
+            
+            if not metadata.get('title') or not metadata.get('description'):
+                continue
+            
+            # Determine rule type
+            rule_type = "deny" if rule_code.strip().startswith("deny") else "warn"
+            
+            # Extract helper functions used by this rule
+            helpers = self._extract_helpers(content, rule_code)
+            
+            # Build full code with package, imports, and helpers
+            full_code = self._build_full_code(package, imports, rule_code, helpers)
+            
+            rule = PolicyRule(
+                package=package,
+                package_title=pkg_metadata.get('title', ''),
+                package_description=pkg_metadata.get('description', ''),
+                title=metadata.get('title', ''),
+                description=metadata.get('description', ''),
+                short_name=metadata.get('short_name', ''),
+                failure_msg=metadata.get('failure_msg', ''),
+                solution=metadata.get('solution', ''),
+                rule_type=rule_type,
+                rule_code=rule_code,
+                full_code=full_code,
+                source_file=str(rego_file),
+                collections=metadata.get('collections', []),
+                depends_on=metadata.get('depends_on', []),
+                effective_on=metadata.get('effective_on', ''),
+                imports_used=imports,
+                helpers_used=[h[:50] + "..." if len(h) > 50 else h for h in helpers]
+            )
+            rules.append(rule)
+        
+        return rules
+    
+    def _extract_package_metadata(self, content: str) -> Dict[str, Any]:
+        """Extract the package-level METADATA block (first one in file)."""
+        # Find first METADATA block that's at the start of file
+        match = re.search(
+            r'^#\s*\n#\s*METADATA\s*\n((?:#[^\n]*\n)+)',
+            content,
+            re.MULTILINE
+        )
+        if match:
+            return self._parse_metadata(match.group(1))
+        return {}
+    
+    def _extract_rules_with_metadata(self, content: str) -> List[Dict]:
+        """Extract all deny/warn rules with their metadata blocks."""
+        rules = []
+        
+        # Find all rule definitions (deny/warn contains result if {...})
+        rule_pattern = re.compile(
+            r'((?:deny|warn)\s+contains\s+result\s+if\s*\{)',
+            re.MULTILINE
+        )
+        
+        for match in rule_pattern.finditer(content):
+            rule_start = match.start()
+            
+            # Find matching closing brace (handle nested braces)
+            brace_count = 1
+            pos = match.end()
+            while pos < len(content) and brace_count > 0:
+                if content[pos] == '{':
+                    brace_count += 1
+                elif content[pos] == '}':
+                    brace_count -= 1
+                pos += 1
+            
+            rule_code = content[rule_start:pos]
+            
+            # Look backwards for METADATA block
+            # Pattern: METADATA followed by comment lines, ending with #\n before the rule
+            before_rule = content[:rule_start]
+            
+            # Try pattern with trailing #\n (common format)
+            metadata_match = re.search(
+                r'#\s*METADATA\s*\n((?:#[^\n]*\n)+)#\s*\n\s*$',
+                before_rule
+            )
+            
+            if not metadata_match:
+                # Fallback: find the last METADATA block before this rule
+                all_metadata = list(re.finditer(
+                    r'#\s*METADATA\s*\n((?:#[^\n]*\n)+)',
+                    before_rule
+                ))
+                if all_metadata:
+                    metadata_match = all_metadata[-1]  # Use closest one
+            
+            if metadata_match:
+                metadata = self._parse_metadata(metadata_match.group(1))
+                rules.append({
+                    'metadata': metadata,
+                    'rule_code': rule_code
+                })
+        
+        return rules
+    
+    def _parse_metadata(self, metadata_block: str) -> Dict[str, Any]:
+        """Parse a METADATA comment block into a dictionary."""
+        metadata = {}
+        
+        # Remove comment markers and join continuation lines
+        lines = []
+        for line in metadata_block.split('\n'):
+            line = re.sub(r'^#\s?', '', line)
+            lines.append(line)
+        text = '\n'.join(lines)
+        
+        # Extract title
+        title_match = re.search(r'title:\s*(.+?)(?:\n|$)', text)
+        if title_match:
+            metadata['title'] = title_match.group(1).strip()
+        
+        # Extract multi-line description (>- format)
+        desc_match = re.search(r'description:\s*>-\s*\n((?:\s+.+\n?)+)', text)
+        if desc_match:
+            desc_lines = desc_match.group(1).split('\n')
+            desc = ' '.join(line.strip() for line in desc_lines if line.strip())
+            metadata['description'] = desc
+        else:
+            # Try single-line description
+            desc_match = re.search(r'description:\s*(.+?)(?:\n(?!\s)|$)', text)
+            if desc_match:
+                metadata['description'] = desc_match.group(1).strip()
+        
+        # Extract custom fields
+        custom_match = re.search(r'custom:\s*\n((?:\s+.+\n?)+)', text)
+        if custom_match:
+            custom_text = custom_match.group(1)
+            
+            # short_name
+            short_name_match = re.search(r'short_name:\s*(\S+)', custom_text)
+            if short_name_match:
+                metadata['short_name'] = short_name_match.group(1)
+            
+            # failure_msg (can be multi-line with >-)
+            failure_msg_match = re.search(r'failure_msg:\s*>-\s*\n((?:\s{4,}.+\n?)+)', custom_text)
+            if failure_msg_match:
+                msg_lines = failure_msg_match.group(1).split('\n')
+                msg = ' '.join(line.strip() for line in msg_lines if line.strip())
+                metadata['failure_msg'] = msg
+            else:
+                failure_msg_match = re.search(r'failure_msg:\s*[\'"]?(.+?)[\'"]?\s*(?:\n|$)', custom_text)
+                if failure_msg_match:
+                    metadata['failure_msg'] = failure_msg_match.group(1).strip().strip("'\"")
+            
+            # solution (multi-line)
+            solution_match = re.search(r'solution:\s*>-\s*\n((?:\s{4,}.+\n?)+)', custom_text)
+            if solution_match:
+                sol_lines = solution_match.group(1).split('\n')
+                sol = ' '.join(line.strip() for line in sol_lines if line.strip())
+                metadata['solution'] = sol
+            else:
+                solution_match = re.search(r'solution:\s*(.+?)(?:\n|$)', custom_text)
+                if solution_match:
+                    metadata['solution'] = solution_match.group(1).strip()
+            
+            # collections
+            collections_match = re.search(r'collections:\s*\n((?:\s+-\s+\S+\n?)+)', custom_text)
+            if collections_match:
+                collections = re.findall(r'-\s+(\S+)', collections_match.group(1))
+                metadata['collections'] = collections
+            
+            # depends_on
+            depends_match = re.search(r'depends_on:\s*\n((?:\s+-\s+\S+\n?)+)', custom_text)
+            if depends_match:
+                depends = re.findall(r'-\s+(\S+)', depends_match.group(1))
+                metadata['depends_on'] = depends
+            
+            # effective_on
+            effective_match = re.search(r'effective_on:\s*(\S+)', custom_text)
+            if effective_match:
+                metadata['effective_on'] = effective_match.group(1)
+        
+        return metadata
+    
+    def _extract_helpers(self, content: str, rule_code: str) -> List[str]:
+        """Extract helper functions referenced by the rule, recursively.
+        
+        Handles:
+        - Function helpers: _helper(x) := value if {...}
+        - Set comprehension helpers: _helper contains x if {...}
+        - Simple constant helpers: _helper := "value"
+        - Recursive extraction of helpers used by other helpers
+        """
+        helpers = []
+        extracted_names = set()  # Track which helpers we've already extracted
+        
+        def extract_helper_code(helper_name: str) -> Optional[str]:
+            """Extract the code for a single helper definition."""
+            # Pattern 1: Function or simple assignment with :=
+            # Matches: _name(args) := ... or _name := ...
+            pattern1 = rf'^({re.escape(helper_name)}(?:\([^)]*\))?\s*:=\s*)'
+            
+            # Pattern 2: Set/object with contains
+            # Matches: _name contains ...
+            pattern2 = rf'^({re.escape(helper_name)}\s+contains\s+)'
+            
+            # Pattern 3: Function with if {...} (no :=)
+            # Matches: _name(args) if {
+            pattern3 = rf'^({re.escape(helper_name)}\([^)]*\)\s+if\s*\{{)'
+            
+            for pattern in [pattern1, pattern2, pattern3]:
+                for match in re.finditer(pattern, content, re.MULTILINE):
+                    start = match.start()
+                    brace_count = 0
+                    in_braces = False
+                    end = start
+                    
+                    # Scan from start to find the end of definition
+                    i = start
+                    while i < len(content):
+                        char = content[i]
+                        
+                        if char == '{':
+                            brace_count += 1
+                            in_braces = True
+                        elif char == '}':
+                            brace_count -= 1
+                            if brace_count == 0 and in_braces:
+                                # End of braced definition
+                                end = i + 1
+                                break
+                        elif char == '\n':
+                            if in_braces:
+                                # Inside braces, continue
+                                pass
+                            elif brace_count == 0:
+                                # Check if this is a simple one-line definition
+                                # (no opening brace yet and we hit newline)
+                                line_so_far = content[start:i]
+                                if ':=' in line_so_far and '{' not in line_so_far:
+                                    # Simple assignment like: _key := "value"
+                                    end = i
+                                    break
+                                # Check next line - if it starts with whitespace, it's continuation
+                                next_line_start = i + 1
+                                if next_line_start < len(content):
+                                    next_char = content[next_line_start] if next_line_start < len(content) else ''
+                                    if next_char in ' \t':
+                                        # Continuation - keep going
+                                        pass
+                                    elif next_char == '#':
+                                        # Comment line - skip
+                                        pass
+                                    else:
+                                        # New definition or blank line
+                                        end = i
+                                        break
+                        i += 1
+                    
+                    if end > start:
+                        return content[start:end].strip()
+            
+            return None
+        
+        def find_helpers_in_code(code: str) -> Set[str]:
+            """Find all helper references (identifiers starting with _) in code."""
+            return set(re.findall(r'\b(_[a-zA-Z_][a-zA-Z0-9_]*)\b', code))
+        
+        # Start with helpers referenced in the main rule
+        to_process = find_helpers_in_code(rule_code)
+        
+        # Recursively extract helpers
+        while to_process:
+            helper_name = to_process.pop()
+            
+            # Skip if already extracted
+            if helper_name in extracted_names:
+                continue
+            
+            extracted_names.add(helper_name)
+            
+            # Extract this helper's code
+            helper_code = extract_helper_code(helper_name)
+            if helper_code:
+                helpers.append(helper_code)
+                
+                # Find any helpers this helper references
+                nested_helpers = find_helpers_in_code(helper_code) - extracted_names
+                to_process.update(nested_helpers)
+        
+        return helpers
+    
+    def _build_full_code(self, package: str, imports: List[str], rule_code: str, helpers: List[str]) -> str:
+        """Build complete Rego code with package, imports, rule, and helpers."""
+        parts = [f"package {package}", "", "import rego.v1"]
+        
+        # Add relevant imports (deduplicate)
+        seen_imports = {"import rego.v1"}
+        for imp in imports:
+            if imp not in seen_imports:
+                parts.append(imp)
+                seen_imports.add(imp)
+        
+        parts.append("")
+        
+        # Add helpers
+        for helper in helpers:
+            parts.append(helper)
+            parts.append("")
+        
+        # Add the main rule
+        parts.append(rule_code)
+        
+        return '\n'.join(parts)
+    
+    def scan_policy_directory(self) -> List[PolicyRule]:
+        """Scan the policy directory for all rules."""
+        all_rules = []
+        
+        # Scan policy/release for deny/warn rules
+        release_dir = self.policy_dir / "release"
+        if release_dir.exists():
+            for rego_file in release_dir.rglob("*.rego"):
+                rules = self.parse_file(rego_file)
+                all_rules.extend(rules)
+                if rules:
+                    self.logger.info(f"  Extracted {len(rules)} rules from {rego_file.name}")
+        
+        return all_rules
+
+
+class InstructionPolisher:
+    """Uses Ollama with Qwen3 to polish instructions for better training quality."""
+    
+    def __init__(self, model: str = "qwen3:latest", enabled: bool = True):
+        self.model = model
+        self.enabled = enabled
+        self.cache = {}  # Cache polished instructions
+        self._ollama_available = None
+    
+    def is_available(self) -> bool:
+        """Check if Ollama is available."""
+        if self._ollama_available is None:
+            try:
+                result = subprocess.run(
+                    ["ollama", "list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                self._ollama_available = result.returncode == 0
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                self._ollama_available = False
+        return self._ollama_available
+    
+    def polish(self, instruction: str, rule_type: str = "deny", title: str = "") -> str:
+        """Polish an instruction using Qwen3 via Ollama.
+        
+        Args:
+            instruction: The raw instruction to polish
+            rule_type: "deny" or "warn"
+            title: Optional rule title for context
+            
+        Returns:
+            Polished instruction, or original if polishing fails
+        """
+        if not self.enabled or not self.is_available():
+            return instruction
+        
+        # Check cache
+        cache_key = f"{instruction}:{rule_type}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        
+        # Build the prompt - request no thinking, just the answer
+        prompt = f"""/no_think
+Rewrite this instruction to be clear, grammatical, and natural-sounding for training data.
+Keep it concise (1-3 sentences). Output ONLY the rewritten instruction, nothing else.
+The instruction is for writing a Rego {rule_type} rule.
+
+Original: {instruction}
+
+Rewritten:"""
+        
+        try:
+            result = subprocess.run(
+                ["ollama", "run", self.model, prompt],
+                capture_output=True,
+                text=True,
+                timeout=90  # Increased timeout for models with thinking
+            )
+            
+            if result.returncode == 0:
+                polished = result.stdout.strip()
+                
+                # Remove terminal escape sequences (colors, cursor movement)
+                polished = re.sub(r'\[\?[0-9]+[hl]', '', polished)
+                polished = re.sub(r'\[[0-9]*[GK]', '', polished)
+                polished = re.sub(r'\[[0-9;]*m', '', polished)
+                
+                # Handle Qwen3 thinking output - extract content after "...done thinking."
+                if "...done thinking." in polished:
+                    parts = polished.split("...done thinking.")
+                    if len(parts) > 1:
+                        polished = parts[-1].strip()
+                
+                # Remove any thinking tags if present
+                polished = re.sub(r'<think>.*?</think>', '', polished, flags=re.DOTALL).strip()
+                
+                # Remove "Thinking..." prefix and other thinking indicators
+                polished = re.sub(r'^Thinking\.+\s*', '', polished)
+                polished = re.sub(r'^Okay,.*?\.', '', polished, flags=re.DOTALL)
+                
+                # Remove quotes if the model wrapped the output
+                polished = polished.strip('"\'')
+                
+                # Remove any "Rewritten:" prefix if model included it
+                if polished.lower().startswith("rewritten:"):
+                    polished = polished[10:].strip()
+                
+                # Clean up whitespace
+                polished = ' '.join(polished.split())
+                
+                # Basic validation - must be non-empty and not too long
+                if polished and len(polished) < 500 and len(polished) > 10:
+                    self.cache[cache_key] = polished
+                    print(f"Polished instruction: {polished}")
+                    return polished
+        except (subprocess.TimeoutExpired, Exception) as e:
+            pass  # Fall back to original
+        
+        return instruction
+
+
+# Global polisher instance (can be disabled via flag)
+_instruction_polisher = None
+
+def get_instruction_polisher(enabled: bool = True) -> InstructionPolisher:
+    """Get or create the instruction polisher."""
+    global _instruction_polisher
+    if _instruction_polisher is None:
+        _instruction_polisher = InstructionPolisher(enabled=enabled)
+    return _instruction_polisher
+
+
+class PolicyExampleGenerator:
+    """Generates training examples from policy rules with rich context."""
+    
+    @staticmethod
+    def _polish_description(desc: str) -> str:
+        """Clean up and polish a description to make it a clear, grammatical instruction."""
+        # Clean up whitespace
+        desc = ' '.join(desc.split())
+        
+        # Fix common grammatical issues
+        # Remove trailing periods before question marks
+        desc = re.sub(r'\.\?', '?', desc)
+        
+        # Add missing articles for common patterns
+        desc = re.sub(r'\bensure that task\b', 'ensure that the task', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\bensure task\b', 'ensure the task', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\bverify that task\b', 'verify that the task', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\bverify task\b', 'verify the task', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\bthat image\b', 'that the image', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\bproducing the images\b', 'producing images', desc, flags=re.IGNORECASE)
+        
+        # Fix missing articles
+        desc = re.sub(r'\bthat task producing\b', 'that the task producing', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\bthat task containing\b', 'that the task containing', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\bensure that a list\b', 'ensure that the list', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\bthat will a list\b', 'that the list', desc, flags=re.IGNORECASE)
+        
+        # Clean up "Ensure that at least one of the tasks" -> cleaner form
+        desc = re.sub(r'Ensure that at least one', 'Ensure at least one', desc, flags=re.IGNORECASE)
+        
+        # Remove duplicate words
+        desc = re.sub(r'\bthe the\b', 'the', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\ba a\b', 'a', desc, flags=re.IGNORECASE)
+        
+        # Fix common lowercase starts after colons
+        desc = re.sub(r':\s+([a-z])', lambda m: ': ' + m.group(1).upper(), desc)
+        
+        # Remove jargon explanations in parentheses if too long
+        if len(desc) > 150:
+            desc = re.sub(r'\([^)]{50,}\)', '', desc)
+        
+        # Ensure first character is uppercase
+        if desc and desc[0].islower():
+            desc = desc[0].upper() + desc[1:]
+        
+        # Clean up extra spaces
+        desc = ' '.join(desc.split())
+        
+        return desc.strip()
+    
+    @staticmethod
+    def _create_instruction(rule: PolicyRule, style: str = "direct") -> str:
+        """Create a clear, polished instruction based on rule metadata.
+        
+        Styles:
+        - direct: Use the polished description as an imperative statement
+        - imperative: "Write a Rego rule that will..."
+        - question: "How can I write a Rego policy to verify that...?"
+        - task: "Create a Rego deny/warn rule that checks..."
+        - detailed: Full structured requirements
+        - from_failure: Based on the error message
+        - with_solution: Include the solution/fix
+        """
+        desc = PolicyExampleGenerator._polish_description(rule.description)
+        title = rule.title
+        
+        if style == "direct":
+            # For direct style, ensure it's a complete imperative sentence
+            desc_lower = desc.lower()
+            # If it starts with a verb, it's already a good instruction
+            if desc_lower.startswith(("verify", "ensure", "check", "confirm", "produce", "validate")):
+                return desc
+            # Otherwise, make it imperative
+            return f"Verify that {desc_lower}" if desc_lower else desc
+        
+        elif style == "imperative":
+            # Convert description to clear imperative form
+            desc_lower = desc.lower()
+            if desc_lower.startswith(("verify that ", "ensure that ", "confirm that ", "check that ")):
+                # Already has "that", just wrap it
+                return f"Write a Rego {rule.rule_type} rule that will {desc_lower}"
+            elif desc_lower.startswith(("verify ", "ensure ", "confirm ", "check ")):
+                # Starts with verb but no "that"
+                return f"Write a Rego {rule.rule_type} rule that will {desc_lower}"
+            elif desc_lower.startswith("produce"):
+                return f"Write a Rego rule that will {desc_lower}"
+            else:
+                # Generic case - make it imperative
+                return f"Write a Rego {rule.rule_type} rule to {desc_lower}"
+        
+        elif style == "question":
+            # Convert to a natural, grammatical question
+            desc_lower = desc.lower()
+            
+            # Handle "produce" descriptions differently (they describe what happens)
+            if desc_lower.startswith("produce"):
+                return f"How do I write a Rego {rule.rule_type} rule that will {desc_lower}?"
+            
+            # Extract the core requirement by removing leading verbs
+            core = desc_lower
+            for verb in ["verify that ", "verify ", "ensure that ", "ensure ", 
+                        "check if ", "check that ", "check ", "confirm that ", "confirm "]:
+                if core.startswith(verb):
+                    core = core[len(verb):]
+                    break
+            
+            # Form a grammatical question
+            if core:
+                return f"How can I write a Rego policy to verify that {core}?"
+            return f"How do I implement a Rego {rule.rule_type} rule for \"{title}\"?"
+        
+        elif style == "task":
+            # Brief but complete task description
+            desc_short = desc if len(desc) < 80 else desc[:77] + "..."
+            if desc_short.lower().startswith(("verify", "ensure", "check", "confirm")):
+                return f"Create a Rego {rule.rule_type} rule that will {desc_short.lower()}"
+            return f"Create a Rego {rule.rule_type} rule: {title}. {desc_short}"
+        
+        elif style == "detailed":
+            # Detailed instruction with full context
+            lines = [f"Write a Rego {rule.rule_type} rule with the following requirements:"]
+            lines.append("")
+            lines.append(f"Purpose: {title}")
+            lines.append(f"Description: {desc}")
+            if rule.failure_msg and '%' not in rule.failure_msg:
+                lines.append(f"Error message when violated: {rule.failure_msg}")
+            return "\n".join(lines)
+        
+        elif style == "from_failure":
+            # Use failure message as guidance
+            if rule.failure_msg and '%' not in rule.failure_msg:
+                clean_msg = rule.failure_msg.replace("'", "").replace('"', '')
+                return f"Write a Rego {rule.rule_type} rule that reports: \"{clean_msg}\""
+            # Fallback to using description
+            return f"Create a Rego {rule.rule_type} rule that will {desc.lower()}"
+        
+        elif style == "with_solution":
+            # Include solution context for richer instruction
+            instruction = desc
+            if rule.solution:
+                clean_solution = PolicyExampleGenerator._polish_description(rule.solution)
+                if len(clean_solution) < 100:
+                    instruction += f" The fix for violations is: {clean_solution}"
+            return instruction
+        
+        return desc
+    
+    @staticmethod
+    def _create_context(rule: PolicyRule) -> str:
+        """Create helpful context about the rule."""
+        context_parts = []
+        
+        # Add package context if available
+        if rule.package_description:
+            context_parts.append(f"# Package: {rule.package}")
+            context_parts.append(f"# {rule.package_description[:200]}...")
+        
+        # Add schema hints based on what the rule checks
+        rule_lower = rule.rule_code.lower()
+        if "pipelinerun_attestations" in rule_lower or "attestation" in rule_lower:
+            context_parts.append("# Input: SLSA Provenance attestation")
+            context_parts.append("# Path: input.attestations[] → statement → predicate")
+        
+        if "tekton.tasks" in rule_lower:
+            context_parts.append("# Checks: Tekton Pipeline tasks")
+        
+        if "task_result" in rule_lower:
+            context_parts.append("# Accesses: Task results (task.results[])")
+        
+        if "task_param" in rule_lower:
+            context_parts.append("# Accesses: Task parameters (task.invocation.parameters)")
+        
+        if "builder.id" in rule_lower:
+            context_parts.append("# Checks: Builder ID in predicate.builder.id")
+        
+        return '\n'.join(context_parts) if context_parts else ""
+    
+    @staticmethod
+    def generate_examples(rules: List[PolicyRule], polish_instructions: bool = True) -> List[Tuple[str, str, Dict]]:
+        """Generate training examples from policy rules with varied instructions.
+        
+        Args:
+            rules: List of PolicyRule objects to generate examples from
+            polish_instructions: If True, use Ollama/Qwen3 to polish instructions
+        """
+        examples = []
+        polisher = get_instruction_polisher(enabled=polish_instructions)
+        
+        # Log polisher status
+        if polish_instructions and polisher.is_available():
+            logging.info("Using Qwen3 via Ollama for instruction polishing")
+        elif polish_instructions:
+            logging.info("Ollama not available, using template-based polishing only")
+        
+        # Instruction styles to use
+        styles = ["direct", "imperative", "question", "task", "detailed", "from_failure", "with_solution"]
+        
+        for rule in rules:
+            # Skip rules without good descriptions
+            if not rule.description or len(rule.description) < 20:
+                continue
+            
+            # Generate multiple instruction variations per rule
+            # More important rules (in more collections) get more variations
+            num_collections = len(rule.collections) if rule.collections else 0
+            num_variations = min(4, 2 + num_collections)
+            
+            used_styles = set()
+            
+            for _ in range(num_variations):
+                # Pick an unused style
+                available_styles = [s for s in styles if s not in used_styles]
+                if not available_styles:
+                    available_styles = styles
+                
+                style = random.choice(available_styles)
+                used_styles.add(style)
+                
+                # Generate instruction
+                instruction = PolicyExampleGenerator._create_instruction(rule, style)
+                
+                # Polish instruction with LLM if available (skip "detailed" style as it's structured)
+                if polish_instructions and style != "detailed":
+                    instruction = polisher.polish(instruction, rule.rule_type, rule.title)
+                
+                # Generate context (optional, for some variations)
+                context = ""
+                if style in ["detailed", "with_solution"] and random.random() < 0.5:
+                    context = PolicyExampleGenerator._create_context(rule)
+                
+                # Build the output code (always the full_code)
+                output_code = rule.full_code
+                
+                # Metadata for tracking
+                metadata = {
+                    "source": "policy_rule",
+                    "package": rule.package,
+                    "short_name": rule.short_name,
+                    "title": rule.title,
+                    "rule_type": rule.rule_type,
+                    "source_file": rule.source_file,
+                    "collections": rule.collections or [],
+                    "instruction_style": style,
+                    "polished": polish_instructions and polisher.is_available(),
+                }
+                
+                # The context field will include any schema hints
+                full_context = context
+                
+                examples.append((instruction, output_code, metadata, full_context))
+        
+        return examples
+    
+    @staticmethod
+    def generate_from_package(rules: List[PolicyRule]) -> List[Tuple[str, str, Dict]]:
+        """Generate examples for entire packages (multiple rules together)."""
+        # Group rules by package
+        packages = {}
+        for rule in rules:
+            if rule.package not in packages:
+                packages[rule.package] = []
+            packages[rule.package].append(rule)
+        
+        examples = []
+        for package, package_rules in packages.items():
+            if len(package_rules) < 2:
+                continue
+            
+            # Create a combined instruction
+            if package_rules[0].package_description:
+                instruction = f"Implement the {package} policy package: {package_rules[0].package_description}"
+            else:
+                instruction = f"Write all policy rules for the {package} package"
+            
+            # Combine all rules and their helpers
+            all_imports = set()
+            all_helpers = set()  # Use set to deduplicate
+            all_rules = []
+            
+            for rule in package_rules:
+                if rule.imports_used:
+                    all_imports.update(rule.imports_used)
+                all_rules.append(rule.rule_code)
+                # Extract helpers from full_code
+                if rule.full_code:
+                    # Get helper section from full_code (between imports and first deny/warn)
+                    import re
+                    lines = rule.full_code.split('\n')
+                    in_helper = False
+                    helper_lines = []
+                    for line in lines:
+                        if line.startswith('_') and (':=' in line or ' contains ' in line):
+                            in_helper = True
+                        if in_helper:
+                            if line.strip().startswith('deny ') or line.strip().startswith('warn '):
+                                break
+                            helper_lines.append(line)
+                    if helper_lines:
+                        helper_block = '\n'.join(helper_lines).strip()
+                        if helper_block:
+                            all_helpers.add(helper_block)
+            
+            # Build combined code
+            parts = [f"package {package}", "", "import rego.v1"]
+            for imp in sorted(all_imports):
+                if imp != "import rego.v1":
+                    parts.append(imp)
+            parts.append("")
+            
+            # Add helpers (sorted for consistency)
+            for helper in sorted(all_helpers):
+                parts.append(helper)
+                parts.append("")
+            
+            # Add rules
+            for rule_code in all_rules:
+                parts.append(rule_code)
+                parts.append("")
+            
+            combined_code = '\n'.join(parts)
+            
+            metadata = {
+                "source": "policy_package",
+                "package": package,
+                "num_rules": len(package_rules),
+                "rule_types": list(set(r.rule_type for r in package_rules)),
+            }
+            
+            examples.append((instruction, combined_code, metadata, ""))
+        
+        return examples
+
+
 class ExampleBuilder:
     """Builds training examples from instructions and attestations."""
     
@@ -1590,12 +2472,13 @@ class ExampleBuilder:
                 return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, ref.params[] (array of {name, value} objects)\n# Access parameter: some param in task.ref.params; param.name == 'X'; value := param.value\n"
             elif "result" in instruction_lower:
                 # Result navigation queries
+                # Note: Use 'r' instead of 'result' to avoid conflicts with 'deny contains result'
                 if "name" in instruction_lower and "result" in instruction_lower:
                     # Result names query
-                    return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, results[] (array of {name, value} objects)\n# Access result names: some result in task.results; result.name\n"
+                    return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, results[] (array of {name, value} objects)\n# Access result names: some r in task.results; r.name\n"
                 else:
                     # Specific result or all results query
-                    return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, results[] (array of {name, value} objects)\n# Access result: some result in task.results; result.name == 'X'; value := result.value\n"
+                    return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, results[] (array of {name, value} objects)\n# Access result: some r in task.results; r.name == 'X'; value := r.value\n"
             else:
                 return "# Attestation Structure:\n# input.attestations[] → statement → predicate → buildConfig.tasks[]\n# Task fields: name, status, ref.bundle, ref.params[], startedOn, finishedOn, results[]\n"
         elif "material" in instruction_lower:
@@ -1793,6 +2676,17 @@ def example_to_jsonl(example: AttestationExample) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
+def policy_example_to_jsonl(instruction: str, output_code: str, metadata: Dict, context: str = "") -> str:
+    """Convert a policy rule example to JSONL format."""
+    data = {
+        "instruction": instruction,
+        "context": context if context else "",
+        "output_code": output_code,
+        "task_type": "rego_policy_rule",
+    }
+    return json.dumps(data, ensure_ascii=False)
+
+
 def main():
     """Main function to generate dataset."""
     parser = argparse.ArgumentParser(
@@ -1808,6 +2702,9 @@ Examples:
 
   # Specify output directory
   python generate_attestation_dataset.py --output-dir ./output
+  
+  # Include policy rules from policy directory
+  python generate_attestation_dataset.py --policy-dir /path/to/policy
         """
     )
     parser.add_argument(
@@ -1821,6 +2718,34 @@ Examples:
         type=str,
         default=None,
         help="Output directory for JSONL files (default: same as script directory)",
+    )
+    parser.add_argument(
+        "--policy-dir",
+        type=str,
+        default=None,
+        help="Directory containing policy Rego files (default: repo root/policy)",
+    )
+    parser.add_argument(
+        "--include-policy-rules",
+        action="store_true",
+        default=True,
+        help="Include training examples from actual policy rules (default: True)",
+    )
+    parser.add_argument(
+        "--no-policy-rules",
+        action="store_true",
+        help="Disable including training examples from policy rules",
+    )
+    parser.add_argument(
+        "--polish-instructions",
+        action="store_true",
+        default=True,
+        help="Use Qwen3 via Ollama to polish policy rule instructions (default: True)",
+    )
+    parser.add_argument(
+        "--no-polish",
+        action="store_true",
+        help="Disable LLM-based instruction polishing",
     )
     
     args = parser.parse_args()
@@ -1926,15 +2851,90 @@ Examples:
         
         logger.info(f"  Generated {len(all_examples)} total examples so far")
     
-    logger.info(f"Total examples generated: {len(all_examples)}")
+    logger.info(f"Total attestation examples generated: {len(all_examples)}")
     
-    # Shuffle and split
+    # Process policy rules if enabled
+    policy_examples = []
+    if args.include_policy_rules and not args.no_policy_rules:
+        logger.info("")
+        logger.info("=" * 70)
+        logger.info("Extracting training examples from policy rules")
+        logger.info("=" * 70)
+        
+        # Determine policy directory
+        if args.policy_dir:
+            policy_dir = Path(args.policy_dir).resolve()
+        else:
+            policy_dir = REPO_ROOT / "policy"
+        
+        if policy_dir.exists():
+            logger.info(f"Scanning policy directory: {policy_dir}")
+            
+            # Parse policy files
+            parser_instance = PolicyRuleParser(policy_dir)
+            rules = parser_instance.scan_policy_directory()
+            
+            logger.info(f"Found {len(rules)} policy rules")
+            
+            # Determine if we should polish instructions
+            polish = args.polish_instructions and not args.no_polish
+            
+            # Generate examples from rules
+            rule_examples = PolicyExampleGenerator.generate_examples(rules, polish_instructions=polish)
+            logger.info(f"Generated {len(rule_examples)} examples from individual rules")
+            
+            # Also generate package-level examples
+            package_examples = PolicyExampleGenerator.generate_from_package(rules)
+            logger.info(f"Generated {len(package_examples)} examples from packages")
+            
+            # Validate and add to policy examples
+            for example_data in rule_examples + package_examples:
+                if len(example_data) == 4:
+                    instruction, output_code, metadata, context = example_data
+                else:
+                    instruction, output_code, metadata = example_data
+                    context = ""
+                
+                # Validate Rego syntax
+                if validate_rego_syntax(output_code):
+                    policy_examples.append({
+                        "instruction": instruction,
+                        "output_code": output_code,
+                        "metadata": metadata,
+                        "context": context
+                    })
+                else:
+                    logger.warning(f"Invalid Rego in policy rule: {metadata.get('short_name', 'unknown')}")
+            
+            logger.info(f"Total valid policy examples: {len(policy_examples)}")
+            
+            # Log some sample instructions for verification
+            if policy_examples:
+                logger.info("")
+                logger.info("Sample policy rule instructions:")
+                for i, ex in enumerate(random.sample(policy_examples, min(5, len(policy_examples)))):
+                    logger.info(f"  {i+1}. {ex['instruction'][:80]}...")
+        else:
+            logger.warning(f"Policy directory not found: {policy_dir}")
+    
+    logger.info("")
+    logger.info(f"Total attestation examples: {len(all_examples)}")
+    logger.info(f"Total policy rule examples: {len(policy_examples)}")
+    
+    # Shuffle and split attestation examples
     random.shuffle(all_examples)
     split_idx = int(len(all_examples) * TRAIN_SPLIT)
     train_examples = all_examples[:split_idx]
     eval_examples = all_examples[split_idx:]
     
-    logger.info(f"Train: {len(train_examples)}, Eval: {len(eval_examples)}")
+    # Shuffle and split policy examples
+    random.shuffle(policy_examples)
+    policy_split_idx = int(len(policy_examples) * TRAIN_SPLIT)
+    policy_train = policy_examples[:policy_split_idx]
+    policy_eval = policy_examples[policy_split_idx:]
+    
+    logger.info(f"Attestation - Train: {len(train_examples)}, Eval: {len(eval_examples)}")
+    logger.info(f"Policy Rules - Train: {len(policy_train)}, Eval: {len(policy_eval)}")
     
     # Determine output directory
     if args.output_dir:
@@ -1954,17 +2954,53 @@ Examples:
         for example in eval_examples:
             f.write(example_to_jsonl(example) + '\n')
     
-    logger.info("Dataset written successfully")
+    logger.info("Attestation dataset written successfully")
     logger.info(f"  Train: {train_path}")
     logger.info(f"  Eval: {eval_path}")
     
+    # Write policy rule examples if any
+    if policy_examples:
+        policy_train_path = output_dir / "policy_rules_train.jsonl"
+        policy_eval_path = output_dir / "policy_rules_eval.jsonl"
+        
+        with open(policy_train_path, 'w') as f:
+            for ex in policy_train:
+                f.write(policy_example_to_jsonl(
+                    ex['instruction'], 
+                    ex['output_code'], 
+                    ex['metadata'],
+                    ex.get('context', '')
+                ) + '\n')
+        
+        with open(policy_eval_path, 'w') as f:
+            for ex in policy_eval:
+                f.write(policy_example_to_jsonl(
+                    ex['instruction'], 
+                    ex['output_code'], 
+                    ex['metadata'],
+                    ex.get('context', '')
+                ) + '\n')
+        
+        logger.info("Policy rules dataset written successfully")
+        logger.info(f"  Train: {policy_train_path}")
+        logger.info(f"  Eval: {policy_eval_path}")
+    
     # Generate summary
     summary = {
-        "total_examples": len(all_examples),
-        "train_examples": len(train_examples),
-        "eval_examples": len(eval_examples),
-        "task_type": "rego_attestation_parse",
-        "source_files": len(json_files),
+        "attestation_examples": {
+            "total": len(all_examples),
+            "train": len(train_examples),
+            "eval": len(eval_examples),
+            "task_type": "rego_attestation_parse",
+            "source_files": len(json_files),
+        },
+        "policy_rule_examples": {
+            "total": len(policy_examples),
+            "train": len(policy_train),
+            "eval": len(policy_eval),
+            "task_type": "rego_policy_rule",
+        },
+        "combined_total": len(all_examples) + len(policy_examples),
     }
     
     summary_path = output_dir / "attestation_dataset_summary.json"
