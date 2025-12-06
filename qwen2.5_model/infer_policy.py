@@ -2595,8 +2595,8 @@ Examples (using base model only - for comparison):
     parser.add_argument(
         "--max-corrections",
         type=int,
-        default=3,
-        help="Maximum number of correction attempts when validation fails (default: 3)",
+        default=5,
+        help="Maximum number of correction attempts when validation fails (default: 5)",
     )
     parser.add_argument(
         "--include-style-guide",
