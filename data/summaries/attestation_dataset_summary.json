@@ -1,0 +1,16 @@
+{
+  "attestation_examples": {
+    "total": 3113,
+    "train": 2801,
+    "eval": 312,
+    "task_type": "rego_attestation_parse",
+    "source_files": 56
+  },
+  "policy_rule_examples": {
+    "total": 449,
+    "train": 404,
+    "eval": 45,
+    "task_type": "rego_policy_rule"
+  },
+  "combined_total": 3562
+}

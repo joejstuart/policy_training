@@ -1,0 +1,24 @@
+[project]
+name = "policy-training"
+version = "0.1.0"
+description = "Training scripts for fine-tuning LLMs on Rego policy rules"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "transformers>=4.40.0",
+    "peft>=0.10.0",
+    "torch>=2.1.0",
+    "accelerate>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+

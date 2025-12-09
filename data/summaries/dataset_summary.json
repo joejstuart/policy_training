@@ -1,0 +1,10 @@
+{
+  "total_examples": 273,
+  "train_examples": 245,
+  "eval_examples": 28,
+  "invalid_examples": 0,
+  "task_types": {
+    "implement": 169,
+    "refactor": 104
+  }
+}

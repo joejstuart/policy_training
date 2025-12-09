@@ -1,0 +1,12 @@
+# Python dependencies for training scripts
+# Install with: uv sync (recommended) or pip install -r requirements.txt
+
+# For generate_dataset.py - uses standard library only
+# Requires OPA and Regal to be installed separately
+
+# For train_policy.py - ML training dependencies
+transformers>=4.40.0
+peft>=0.10.0
+torch>=2.0.0
+accelerate>=0.30.0
+

@@ -23,39 +23,54 @@ test_slsa_builder_id_found if {
 		{"statement": {"predicate": {"buildType": lib.tekton_pipeline_run}}},
 	]
 
-	slsa_v1_attestations := [
-		# Missing predicate.runDetails.builder.id
-		{"statement": {
-			"predicateType": "https://slsa.dev/provenance/v1",
-			"predicate": {
-				"buildDefinition": {
-					"buildType": "https://tekton.dev/chains/v2/slsa",
-					"externalParameters": {"runSpec": {"pipelineSpec": {}}},
-				},
-				"runDetails": {"builder": {}},
-			},
-		}},
-		# Missing predicate.runDetails.builder
-		{"statement": {
-			"predicateType": "https://slsa.dev/provenance/v1",
-			"predicate": {
-				"buildDefinition": {
-					"buildType": "https://tekton.dev/chains/v2/slsa",
-					"externalParameters": {"runSpec": {"pipelineSpec": {}}},
-				},
-				"runDetails": {},
-			},
-		}},
-	]
-
 	expected := {{
 		"code": "slsa_build_build_service.slsa_builder_id_found",
 		"msg": "Builder ID not set in attestation",
 	}}
 
 	lib.assert_equal_results(expected, slsa_build_build_service.deny) with input.attestations as slsa_v02_attestations
+}
 
-	lib.assert_equal_results(expected, slsa_build_build_service.deny) with input.attestations as slsa_v1_attestations
+test_slsa_builder_id_found_v1_missing_builder_id if {
+	# Missing predicate.runDetails.builder.id
+	slsa_v1_attestation_missing_id := {"statement": {
+		"predicateType": "https://slsa.dev/provenance/v1",
+		"predicate": {
+			"buildDefinition": {
+				"buildType": "https://tekton.dev/chains/v2/slsa",
+				"externalParameters": {"runSpec": {"pipelineSpec": {}}},
+			},
+			"runDetails": {"builder": {}},
+		},
+	}}
+
+	expected := {{
+		"code": "slsa_build_build_service.slsa_builder_id_found",
+		"msg": "Builder ID not set in attestation",
+	}}
+
+	lib.assert_equal_results(expected, slsa_build_build_service.deny) with input.attestations as [slsa_v1_attestation_missing_id]
+}
+
+test_slsa_builder_id_found_v1_missing_builder if {
+	# Missing predicate.runDetails.builder
+	slsa_v1_attestation_missing_builder := {"statement": {
+		"predicateType": "https://slsa.dev/provenance/v1",
+		"predicate": {
+			"buildDefinition": {
+				"buildType": "https://tekton.dev/chains/v2/slsa",
+				"externalParameters": {"runSpec": {"pipelineSpec": {}}},
+			},
+			"runDetails": {},
+		},
+	}}
+
+	expected := {{
+		"code": "slsa_build_build_service.slsa_builder_id_found",
+		"msg": "Builder ID not set in attestation",
+	}}
+
+	lib.assert_equal_results(expected, slsa_build_build_service.deny) with input.attestations as [slsa_v1_attestation_missing_builder]
 }
 
 test_accepted_slsa_builder_id if {

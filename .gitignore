@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.ipynb_checkpoints/
+
+# Logs
+logs/*.log
+
+# Model outputs (large files)
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# Temporary files
+*.tmp
+*.checkpoint.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large attestation files (keep sample only)
+data/attestations/quay.io_*.json
+
+# uv lock (regenerated)
+# uv.lock
