@@ -134,15 +134,55 @@ QWEN_SYSTEM_PROMPT_ATTESTATION = (
 def build_messages_from_example(example):
     """Build chat messages from policy training example.
     
-    Format:
+    Supports two formats:
+    
+    Format 1 (legacy - policy rules):
     - instruction: Task description
-    - context: Package + imports + helpers (for policy rules) or JSON attestation (for attestation parsing)
+    - context: Package + imports + helpers
     - input_code: (optional) Code to refactor
     - output_code: Expected output code
     - task_type: "implement", "refactor", or "rego_attestation_parse"
+    
+    Format 2 (two-stage training):
+    - instruction: Natural language instruction (user request)
+    - input: System prompt or additional context
+    - output: Expected model output
     """
-    # Select system prompt based on task type
+    # Select system prompt based on task type or format
     task_type = example.get("task_type", "implement")
+    
+    # Detect format 2 (two-stage) by presence of 'input' and 'output' keys
+    is_two_stage = "input" in example and "output" in example and "context" not in example
+    
+    if is_two_stage:
+        # Format 2: Two-stage training
+        # The 'input' field contains the system prompt/context
+        # The 'instruction' field is what the user types
+        system_prompt = (
+            "You are an expert Rego policy assistant. "
+            "Follow the instructions carefully and provide accurate, well-structured responses."
+        )
+        messages = [
+            {"role": "system", "content": system_prompt}
+        ]
+        
+        # Build user message: instruction + input (if input provides additional context)
+        user_parts = []
+        if "instruction" in example:
+            user_parts.append(example["instruction"])
+        if "input" in example and example["input"]:
+            user_parts.append("\n" + example["input"])
+        
+        user_content = "\n".join(user_parts)
+        messages.append({"role": "user", "content": user_content})
+        
+        # Assistant response
+        if "output" in example:
+            messages.append({"role": "assistant", "content": example["output"]})
+        
+        return messages
+    
+    # Format 1: Legacy format
     if task_type == "rego_attestation_parse":
         system_prompt = QWEN_SYSTEM_PROMPT_ATTESTATION
     else:
