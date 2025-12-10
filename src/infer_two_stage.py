@@ -56,7 +56,7 @@ class TwoStageGenerator:
     )
     
     # Fixed instruction for Stage 1 (model trained with this)
-    STAGE1_INPUT_PROMPT = "Analyze the requirements and identify the attestation schema, available helpers, and rule data keys needed to implement this Rego rule."
+    STAGE1_INPUT_PROMPT = "Analyze the requirements and identify the attestation schema, available helpers, rule data keys, and suggest an appropriate package name and rule type (deny/warn) for this Rego rule."
     
     # Fixed instruction for Stage 2 (model trained with this)
     STAGE2_INSTRUCTION = "Write a Rego rule that enforces the requirements below using the provided context."
@@ -235,8 +235,11 @@ class TwoStageGenerator:
         if self.stage2_model is None:
             raise RuntimeError("Stage 2 model not loaded. Provide --stage2-model path.")
         
-        # Build user content: instruction + requirements + context
-        user_content = f"{self.STAGE2_INSTRUCTION}\n\nREQUIREMENTS:\n{requirements}\n\n{context}"
+        # Build user content EXACTLY matching training format:
+        # instruction + "\n" + input (where input = "REQUIREMENTS:\n..." + "\n\n" + context)
+        # See: train_policy.py lines 169-177 and generate_two_stage_dataset.py Stage2Example.format_input()
+        input_text = f"REQUIREMENTS:\n{requirements}\n\n{context}"
+        user_content = f"{self.STAGE2_INSTRUCTION}\n{input_text}"
         
         messages = self._build_messages(self.SYSTEM_PROMPT, user_content)
         
@@ -285,8 +288,11 @@ class TwoStageGenerator:
             if not self._validate_context(context):
                 print("\nWarning: Context missing expected sections (ATTESTATION_SCHEMA, AVAILABLE_HELPERS)")
         
-        # Build requirements from instruction for Stage 2
-        requirements = f"- {instruction}"
+        # Build structured requirements from instruction + Stage 1 metadata
+        requirements = self._build_structured_requirements(instruction, context)
+        
+        if verbose:
+            print(f"\nStructured requirements:\n{requirements}")
         
         # Stage 2: Generate rule
         if verbose:
@@ -312,6 +318,42 @@ class TwoStageGenerator:
         """Validate Stage 1 output contains expected sections."""
         required = ["ATTESTATION_SCHEMA:", "AVAILABLE_HELPERS:"]
         return all(section in context for section in required)
+    
+    def _parse_stage1_metadata(self, context: str) -> dict:
+        """Extract SUGGESTED_PACKAGE and SUGGESTED_RULE_TYPE from Stage 1 output."""
+        metadata = {
+            "package": "",
+            "rule_type": "deny",  # Default
+        }
+        
+        for line in context.split('\n'):
+            line = line.strip()
+            if line.startswith('SUGGESTED_PACKAGE:'):
+                metadata["package"] = line.split(':', 1)[1].strip()
+            elif line.startswith('SUGGESTED_RULE_TYPE:'):
+                rule_type = line.split(':', 1)[1].strip().lower()
+                if rule_type in ('deny', 'warn'):
+                    metadata["rule_type"] = rule_type
+        
+        return metadata
+    
+    def _build_structured_requirements(self, instruction: str, context: str) -> str:
+        """Build structured requirements for Stage 2 using Stage 1 metadata.
+        
+        This bridges the gap between:
+        - Training data: rich structured requirements
+        - Inference: just user's instruction
+        """
+        metadata = self._parse_stage1_metadata(context)
+        
+        parts = [f"- {instruction}"]
+        
+        if metadata["package"]:
+            parts.append(f"- Package: {metadata['package']}")
+        
+        parts.append(f"- Rule type: {metadata['rule_type']}")
+        
+        return '\n'.join(parts)
 
 
 def main():
@@ -457,7 +499,9 @@ Examples:
                     if not context:
                         print("Error: Provide --context or --context-file for Stage 2")
                         continue
-                    result = generator.generate_rule(f"- {instruction}", context)
+                    # Build structured requirements from context metadata
+                    requirements = generator._build_structured_requirements(instruction, context)
+                    result = generator.generate_rule(requirements, context)
                     print(f"\n{result}\n")
                 else:
                     result = generator.generate(instruction, context=context, verbose=verbose)
@@ -489,8 +533,11 @@ Examples:
         if not context:
             parser.error("Stage 2 requires --context or --context-file")
         
+        # Build structured requirements from context metadata
+        requirements = generator._build_structured_requirements(args.instruction, context)
+        
         result = generator.generate_rule(
-            f"- {args.instruction}",
+            requirements,
             context,
             max_tokens=args.max_tokens,
             temperature=args.temperature,

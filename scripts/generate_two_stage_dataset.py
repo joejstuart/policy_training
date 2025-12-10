@@ -51,10 +51,30 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 USE_LLM_ANALYSIS = True  # Set to False to use rule-based analysis
 
 # System prompt for Stage 1 (constant - tells model what to output)
-STAGE1_SYSTEM_PROMPT = "Analyze the requirements and identify the attestation schema, available helpers, and rule data keys needed to implement this Rego rule."
+STAGE1_SYSTEM_PROMPT = "Analyze the requirements and identify the attestation schema, available helpers, rule data keys, and suggest an appropriate package name and rule type (deny/warn) for this Rego rule."
 
-# Stage 2 instruction (fixed format - receives structured input from Stage 1)
-STAGE2_INSTRUCTION = "Write a Rego rule that enforces the requirements below using the provided context."
+# Stage 2 coordinated styles - instruction and requirement phrasing must match
+STAGE2_STYLES = [
+    {
+        "instruction": "Write a Rego rule that enforces the requirements below using the provided context.",
+        "requirement_prefix": "",  # Direct statement: "Verify that X"
+    },
+    {
+        "instruction": "Implement a Rego policy based on the requirements and context provided.",
+        "requirement_prefix": "Policy: ",  # "Policy: Ensure X"
+    },
+    {
+        "instruction": "Generate Rego code that satisfies these requirements.",
+        "requirement_prefix": "Requirement: ",  # "Requirement: Check X"
+    },
+    {
+        "instruction": "Create a deny/warn rule matching the specifications below.",
+        "requirement_prefix": "Specification: ",  # "Specification: X must Y"
+    },
+]
+
+# Default Stage 2 instruction (for backward compatibility)
+STAGE2_INSTRUCTION = STAGE2_STYLES[0]["instruction"]
 
 
 def generate_natural_language_instruction(
@@ -227,13 +247,15 @@ class Stage1Example:
     
     The instruction is what the user types (varied natural language).
     The input contains the system prompt.
-    The output is the inferred context.
+    The output is the inferred context INCLUDING suggested package/rule_type for Stage 2.
     """
     natural_instruction: str  # What user writes (varied)
     requirements: str  # Structured requirements for reference
     attestation_schema: str
     available_helpers: str
     rule_data_keys: str
+    suggested_package: str = ""  # Suggested package name for the rule
+    suggested_rule_type: str = "deny"  # deny or warn
     
     def format_instruction(self) -> str:
         """The natural language instruction (user-facing, varied)."""
@@ -249,6 +271,9 @@ class Stage1Example:
         parts.append(f"\nAVAILABLE_HELPERS:\n{self.available_helpers}")
         if self.rule_data_keys:
             parts.append(f"\nRULE_DATA_KEYS:\n{self.rule_data_keys}")
+        # Add suggested metadata for Stage 2 requirements
+        parts.append(f"\nSUGGESTED_PACKAGE: {self.suggested_package}")
+        parts.append(f"SUGGESTED_RULE_TYPE: {self.suggested_rule_type}")
         return "\n".join(parts)
 
 
@@ -260,9 +285,15 @@ class Stage2Example:
     analysis: str
     rule_code: str  # Complete code with helpers
     test_code: Optional[str] = None
+    instruction: str = STAGE2_INSTRUCTION  # Can vary
+    requirement_prefix: str = ""  # Can vary to match instruction style
     
     def format_input(self) -> str:
-        return f"REQUIREMENTS:\n{self.requirements}\n\n{self.context}"
+        # Apply requirement prefix if set
+        req_text = self.requirements
+        if self.requirement_prefix and not req_text.startswith(self.requirement_prefix):
+            req_text = f"{self.requirement_prefix}{req_text}"
+        return f"REQUIREMENTS:\n{req_text}\n\n{self.context}"
     
     def format_output(self) -> str:
         parts = []
@@ -677,6 +708,8 @@ class TwoStageDataGenerator:
             attestation_schema=schema,
             available_helpers=helpers,
             rule_data_keys=rule_data,
+            suggested_package=rule.package,
+            suggested_rule_type=rule.rule_type,
         )
     
     def generate_stage2_example(self, rule: ExtractedRule, stage1: Stage1Example) -> Stage2Example:
@@ -1227,15 +1260,21 @@ Output:"""
         self, 
         augment: bool = False, 
         variations_per_rule: int = 4
-    ) -> Tuple[List[Stage1Example], List[Stage2Example]]:
+    ) -> Tuple[List[Stage1Example], List[Stage2Example], List[int], List[int]]:
         """Process all rules in policy/release and generate training examples.
         
         Args:
             augment: If True, generate multiple instruction variations per rule
             variations_per_rule: Number of variations to generate (if augment=True)
+            
+        Returns:
+            Tuple of (stage1_examples, stage2_examples, stage1_to_rule_mapping, stage2_to_rule_mapping)
+            The mappings indicate which rule index each example belongs to.
         """
         stage1_examples = []
         stage2_examples = []
+        stage1_to_rule_mapping = []  # stage1_to_rule_mapping[i] = rule index
+        stage2_to_rule_mapping = []  # stage2_to_rule_mapping[i] = rule index
         
         # Find all Rego files (excluding tests)
         rego_files = [
@@ -1245,7 +1284,9 @@ Output:"""
         
         print(f"\nProcessing {len(rego_files)} Rego files...")
         if augment:
-            print(f"  Data augmentation: {variations_per_rule} variations per rule")
+            print(f"  Data augmentation: {variations_per_rule} Stage 1 + {len(STAGE2_STYLES)} Stage 2 variations per rule")
+        
+        rule_index = 0  # Track which unique rule we're on
         
         for rego_file in rego_files:
             rel_path = rego_file.relative_to(POLICY_RELEASE_DIR)
@@ -1257,31 +1298,199 @@ Output:"""
             for rule in rules:
                 try:
                     if augment:
-                        # Generate multiple variations
+                        # Generate multiple Stage 1 variations
                         variations = self._generate_instruction_variations(
                             rule.metadata, rule.rule_type, variations_per_rule
                         )
                         
-                        for instruction in variations:
+                        first_stage1 = None
+                        for i, instruction in enumerate(variations):
                             # Generate Stage 1 example with this instruction
                             stage1 = self._generate_stage1_with_instruction(rule, instruction)
                             stage1_examples.append(stage1)
+                            stage1_to_rule_mapping.append(rule_index)
                             
-                            # Generate Stage 2 example
-                            stage2 = self.generate_stage2_example(rule, stage1)
-                            stage2_examples.append(stage2)
+                            if i == 0:
+                                first_stage1 = stage1
+                        
+                        # Generate Stage 2 variations (different input styles, same output)
+                        if first_stage1:
+                            stage2_variations = self._generate_stage2_variations(
+                                rule, first_stage1, num_variations=len(STAGE2_STYLES)
+                            )
+                            for stage2 in stage2_variations:
+                                stage2_examples.append(stage2)
+                                stage2_to_rule_mapping.append(rule_index)
+                            rule_index += 1
                     else:
-                        # Original behavior: one example per rule
+                        # Original behavior: one example per rule (1:1 mapping)
                         stage1 = self.generate_stage1_example(rule)
                         stage1_examples.append(stage1)
+                        stage1_to_rule_mapping.append(rule_index)
                         
                         stage2 = self.generate_stage2_example(rule, stage1)
                         stage2_examples.append(stage2)
+                        stage2_to_rule_mapping.append(rule_index)
+                        rule_index += 1
                         
                 except Exception as e:
                     print(f"    Error processing rule in {rel_path}: {e}")
         
-        return stage1_examples, stage2_examples
+        return stage1_examples, stage2_examples, stage1_to_rule_mapping, stage2_to_rule_mapping
+    
+    def _generate_stage2_variations(
+        self, 
+        rule: ExtractedRule, 
+        stage1: Stage1Example, 
+        num_variations: int = 4
+    ) -> List[Stage2Example]:
+        """Generate Stage 2 variations with coordinated instruction + requirement styles.
+        
+        Uses LLM if available to generate natural phrasing variations.
+        Falls back to template-based generation.
+        """
+        variations = []
+        
+        # Generate base example data once
+        analysis = self._generate_analysis(rule)
+        complete_code = rule.get_complete_code()
+        context = stage1.format_output()
+        base_requirements = stage1.requirements
+        
+        # Try LLM-based generation first
+        if self.use_llm:
+            llm_variations = self._generate_stage2_llm_variations(
+                rule, base_requirements, num_variations
+            )
+            if llm_variations and len(llm_variations) >= num_variations:
+                for instruction, requirements in llm_variations[:num_variations]:
+                    stage2 = Stage2Example(
+                        requirements=requirements,
+                        context=context,
+                        analysis=analysis,
+                        rule_code=complete_code,
+                        test_code=rule.test_code,
+                        instruction=instruction,
+                        requirement_prefix="",  # Already incorporated
+                    )
+                    variations.append(stage2)
+                return variations
+        
+        # Fallback: template-based generation
+        for i, style in enumerate(STAGE2_STYLES[:num_variations]):
+            stage2 = Stage2Example(
+                requirements=base_requirements,
+                context=context,
+                analysis=analysis,
+                rule_code=complete_code,
+                test_code=rule.test_code,
+                instruction=style["instruction"],
+                requirement_prefix=style["requirement_prefix"],
+            )
+            variations.append(stage2)
+        
+        return variations
+    
+    def _generate_stage2_llm_variations(
+        self, 
+        rule: ExtractedRule, 
+        base_requirements: str,
+        num_variations: int = 4
+    ) -> List[Tuple[str, str]]:
+        """Use LLM to generate coordinated instruction + requirements variations.
+        
+        Returns list of (instruction, requirements) tuples.
+        """
+        title = rule.metadata.title or ""
+        description = rule.metadata.description or ""
+        rule_type = rule.rule_type
+        
+        prompt = f"""/no_think
+Generate {num_variations} different ways to request Rego code for this policy rule.
+Each variation needs a coordinated INSTRUCTION and REQUIREMENTS that make sense together.
+
+Rule info:
+- Title: {title}
+- Description: {description}
+- Rule type: {rule_type}
+
+Base requirements:
+{base_requirements}
+
+Generate exactly {num_variations} variations in this exact format:
+
+VARIATION 1:
+INSTRUCTION: <instruction text>
+REQUIREMENTS: <requirements text>
+
+VARIATION 2:
+INSTRUCTION: <instruction text>
+REQUIREMENTS: <requirements text>
+
+(continue for all {num_variations} variations)
+
+Guidelines:
+- Instructions should vary in style: directive, question, task-based, need-based
+- Requirements should rephrase the same policy intent differently
+- Keep requirements concise but complete
+- Make instruction and requirements coherent together
+- Do NOT change the technical content, only the phrasing
+
+Output:"""
+        
+        response = self.llm.generate(prompt, max_tokens=500) if self.llm else None
+        if not response:
+            return []
+        
+        # Parse the response
+        variations = []
+        current_instruction = None
+        current_requirements = []
+        
+        for line in response.split('\n'):
+            line = line.strip()
+            if line.startswith('INSTRUCTION:'):
+                # Save previous variation if exists
+                if current_instruction and current_requirements:
+                    req_text = '\n'.join(current_requirements).strip()
+                    variations.append((current_instruction, req_text))
+                # Start new variation
+                current_instruction = line[len('INSTRUCTION:'):].strip()
+                current_requirements = []
+            elif line.startswith('REQUIREMENTS:'):
+                req_text = line[len('REQUIREMENTS:'):].strip()
+                if req_text:
+                    current_requirements.append(req_text)
+            elif line.startswith('VARIATION') or line.startswith('---'):
+                # Separator, save if we have a complete variation
+                if current_instruction and current_requirements:
+                    req_text = '\n'.join(current_requirements).strip()
+                    variations.append((current_instruction, req_text))
+                    current_instruction = None
+                    current_requirements = []
+            elif current_instruction is not None and line:
+                # Continuation of requirements
+                current_requirements.append(line)
+        
+        # Don't forget the last variation
+        if current_instruction and current_requirements:
+            req_text = '\n'.join(current_requirements).strip()
+            variations.append((current_instruction, req_text))
+        
+        # Validate variations
+        valid_variations = []
+        for instruction, requirements in variations:
+            # Basic validation
+            if len(instruction) > 10 and len(requirements) > 10:
+                # Ensure requirements still contain key info
+                if 'Package:' in requirements or rule_type in requirements.lower():
+                    valid_variations.append((instruction, requirements))
+                else:
+                    # Add package info if missing
+                    enhanced_req = f"{requirements}\n- Package: {rule.package}\n- Rule type: {rule_type}"
+                    valid_variations.append((instruction, enhanced_req))
+        
+        return valid_variations
     
     def _generate_stage1_with_instruction(self, rule: ExtractedRule, instruction: str) -> Stage1Example:
         """Generate Stage 1 example with a specific instruction."""
@@ -1297,6 +1506,8 @@ Output:"""
             attestation_schema=schema,
             available_helpers=helpers,
             rule_data_keys=rule_data,
+            suggested_package=rule.package,
+            suggested_rule_type=rule.rule_type,
         )
 
 
@@ -1304,7 +1515,7 @@ def save_examples(examples: list, output_path: Path, stage: int):
     """Save examples to JSONL file.
     
     Stage 1: instruction=natural language (varied), input=system prompt
-    Stage 2: instruction=fixed prompt, input=requirements+context
+    Stage 2: instruction=varied (coordinated with requirements), input=requirements+context
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -1318,9 +1529,9 @@ def save_examples(examples: list, output_path: Path, stage: int):
                     "output": example.format_output(),
                 }
             else:
-                # Stage 2: Fixed instruction, structured input
+                # Stage 2: Instruction can vary (coordinated with requirement prefix)
                 data = {
-                    "instruction": STAGE2_INSTRUCTION,
+                    "instruction": example.instruction,
                     "input": example.format_input(),
                     "output": example.format_output(),
                 }
@@ -1362,30 +1573,51 @@ def main():
     # Initialize generator
     generator = TwoStageDataGenerator(REPO_ROOT, use_llm=not args.no_llm)
     
-    # Process all rules - returns paired lists (stage1[i] corresponds to stage2[i])
-    stage1_examples, stage2_examples = generator.process_all_rules(
+    # Process all rules - returns examples and mappings
+    stage1_examples, stage2_examples, stage1_to_rule_mapping, stage2_to_rule_mapping = generator.process_all_rules(
         augment=args.augment,
         variations_per_rule=args.variations
     )
     
+    # Count unique rules
+    num_unique_rules = len(set(stage1_to_rule_mapping))
+    
     print(f"\nGenerated {len(stage1_examples)} Stage 1 examples")
     print(f"Generated {len(stage2_examples)} Stage 2 examples")
+    print(f"Unique rules: {num_unique_rules}")
     
     # IMPORTANT: Keep paired examples in the same split (per TWO_STAGE_INFERENCE.md)
-    # Shuffle indices first, then split
-    indices = list(range(len(stage1_examples)))
+    # Split by UNIQUE RULES, then include associated Stage 1 and Stage 2 examples
+    unique_rules = list(set(stage1_to_rule_mapping))
     random.seed(42)  # Reproducible shuffle
-    random.shuffle(indices)
+    random.shuffle(unique_rules)
     
-    split_idx = int(len(indices) * 0.9)
-    train_indices = indices[:split_idx]
-    eval_indices = indices[split_idx:]
+    split_idx = int(len(unique_rules) * 0.9)
+    train_rule_indices = set(unique_rules[:split_idx])
+    eval_rule_indices = set(unique_rules[split_idx:])
     
-    # Split using shuffled indices
-    stage1_train = [stage1_examples[i] for i in train_indices]
-    stage1_eval = [stage1_examples[i] for i in eval_indices]
-    stage2_train = [stage2_examples[i] for i in train_indices]
-    stage2_eval = [stage2_examples[i] for i in eval_indices]
+    # Split Stage 1 based on which rule each example belongs to
+    stage1_train = []
+    stage1_eval = []
+    for i, stage1 in enumerate(stage1_examples):
+        rule_idx = stage1_to_rule_mapping[i]
+        if rule_idx in train_rule_indices:
+            stage1_train.append(stage1)
+        else:
+            stage1_eval.append(stage1)
+    
+    # Split Stage 2 based on which rule each example belongs to
+    stage2_train = []
+    stage2_eval = []
+    for i, stage2 in enumerate(stage2_examples):
+        rule_idx = stage2_to_rule_mapping[i]
+        if rule_idx in train_rule_indices:
+            stage2_train.append(stage2)
+        else:
+            stage2_eval.append(stage2)
+    
+    print(f"  Train: {len(stage1_train)} Stage 1, {len(stage2_train)} Stage 2 ({len(train_rule_indices)} rules)")
+    print(f"  Eval:  {len(stage1_eval)} Stage 1, {len(stage2_eval)} Stage 2 ({len(eval_rule_indices)} rules)")
     
     # Save Stage 1 examples
     save_examples(stage1_train, OUTPUT_DIR / "stage1_train.jsonl", 1)
