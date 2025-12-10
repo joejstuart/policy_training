@@ -4,6 +4,43 @@ This document outlines the implementation plan for the two-stage Rego policy tra
 
 ---
 
+## Implementation Status
+
+| Component | Status | File |
+|-----------|--------|------|
+| Data Generation | ✅ Complete | `scripts/generate_two_stage_dataset.py` |
+| Training Script | ✅ Complete | `src/train_policy.py` (updated for two-stage format) |
+| Inference Script | ✅ Complete | `src/infer_two_stage.py` |
+| Training Data | ✅ Generated | `data/training/two_stage/*.jsonl` |
+
+### Quick Commands
+
+```bash
+# 1. Generate training data (uses LLM for ANALYSIS sections)
+python scripts/generate_two_stage_dataset.py
+
+# 2. Train Stage 1 (context inference)
+python src/train_policy.py \
+    --train-path data/training/two_stage/stage1_train.jsonl \
+    --eval-path data/training/two_stage/stage1_eval.jsonl \
+    --output-dir models/stage1-context-inference
+
+# 3. Train Stage 2 (rule generation)
+python src/train_policy.py \
+    --train-path data/training/two_stage/stage2_train.jsonl \
+    --eval-path data/training/two_stage/stage2_eval.jsonl \
+    --output-dir models/stage2-rule-generation \
+    --max-seq-len 2048
+
+# 4. Run inference
+python src/infer_two_stage.py \
+    --stage1-model models/stage1-context-inference \
+    --stage2-model models/stage2-rule-generation \
+    --instruction "Check that all pipeline tasks succeeded"
+```
+
+---
+
 ## Overview
 
 ```

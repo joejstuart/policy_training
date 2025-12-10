@@ -127,10 +127,12 @@ python src/train_policy.py \
     --train-path data/training/two_stage/stage1_train.jsonl \
     --eval-path data/training/two_stage/stage1_eval.jsonl \
     --output-dir models/stage1-context-inference-4b \
-    --model-name Qwen/Qwen3-4B-Instruct \
+    --model-name Qwen/Qwen3-4B \
     --use-4bit \
     --max-seq-len 1024
 ```
+
+> **Note:** Qwen3 models may require HuggingFace authentication. Run `huggingface-cli login` first.
 
 ---
 
