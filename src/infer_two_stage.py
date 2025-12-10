@@ -49,17 +49,10 @@ except ImportError:
 class TwoStageGenerator:
     """Two-stage Rego policy generator."""
     
-    # System prompt for Stage 1
-    STAGE1_SYSTEM_PROMPT = (
+    # System prompt - MUST MATCH training (train_policy.py line 161-163)
+    SYSTEM_PROMPT = (
         "You are an expert Rego policy assistant. "
-        "Analyze requirements and identify the attestation schema, helpers, and rule data keys needed."
-    )
-    
-    # System prompt for Stage 2
-    STAGE2_SYSTEM_PROMPT = (
-        "You are an expert Rego policy assistant. "
-        "Write valid Rego code using the provided context. "
-        "Follow Conforma patterns: deny contains result, METADATA blocks, result_helper."
+        "Follow the instructions carefully and provide accurate, well-structured responses."
     )
     
     # Fixed instruction for Stage 1 (model trained with this)
@@ -216,7 +209,7 @@ class TwoStageGenerator:
         # Build user content: instruction + system prompt (matches training format)
         user_content = f"{instruction}\n{self.STAGE1_INPUT_PROMPT}"
         
-        messages = self._build_messages(self.STAGE1_SYSTEM_PROMPT, user_content)
+        messages = self._build_messages(self.SYSTEM_PROMPT, user_content)
         
         return self._generate(
             self.stage1_tokenizer,
@@ -245,7 +238,7 @@ class TwoStageGenerator:
         # Build user content: instruction + requirements + context
         user_content = f"{self.STAGE2_INSTRUCTION}\n\nREQUIREMENTS:\n{requirements}\n\n{context}"
         
-        messages = self._build_messages(self.STAGE2_SYSTEM_PROMPT, user_content)
+        messages = self._build_messages(self.SYSTEM_PROMPT, user_content)
         
         return self._generate(
             self.stage2_tokenizer,
@@ -286,7 +279,7 @@ class TwoStageGenerator:
             
             if verbose:
                 print(f"\nInferred context ({len(context)} chars):")
-                print(context[:500] + "..." if len(context) > 500 else context)
+                print(context)  # Show full context
             
             # Validate context
             if not self._validate_context(context):
@@ -308,7 +301,7 @@ class TwoStageGenerator:
         
         if verbose:
             print(f"\nGenerated output ({len(output)} chars):")
-            print(output[:1000] + "..." if len(output) > 1000 else output)
+            print(output)  # Show full output
         
         return {
             "context": context,

@@ -1158,8 +1158,82 @@ Write ONLY the bullet points, no introduction or conclusion:"""
         
         return '\n'.join(analysis_parts)
     
-    def process_all_rules(self) -> Tuple[List[Stage1Example], List[Stage2Example]]:
-        """Process all rules in policy/release and generate training examples."""
+    def _generate_instruction_variations(self, metadata: RuleMetadata, rule_type: str, count: int = 4) -> List[str]:
+        """Generate multiple instruction variations for data augmentation.
+        
+        Uses LLM to create diverse phrasings of the same requirement.
+        """
+        title = metadata.title or ""
+        description = metadata.description or ""
+        
+        if not description and not title:
+            return [f"Implement a {rule_type} rule"]
+        
+        variations = []
+        
+        # Always include the original description
+        if description:
+            variations.append(description)
+        
+        # Try LLM for additional variations
+        if self.use_llm and self.llm and self.llm.is_available() and description:
+            styles = [
+                "a direct command like 'Create a rule that...' or 'Verify that...'",
+                "a question like 'How do I check if...' or 'How can I verify...'",
+                "a need statement like 'I need to ensure...' or 'I want to validate...'",
+                "an informal request like 'Make sure...' or 'Check that...'",
+            ]
+            
+            for style in styles[:count-1]:  # -1 because we already have the original
+                prompt = f"""/no_think
+Rephrase this policy requirement using {style}.
+
+Title: {title}
+Description: {description}
+Rule type: {rule_type}
+
+Rules:
+- Output ONLY the rephrased request (one sentence)
+- Keep the same meaning
+- Sound natural, like a developer asking for help
+
+Output:"""
+                
+                result = self.llm.generate(prompt, max_tokens=100)
+                if result:
+                    result = result.strip().strip('"\'')
+                    if result.lower().startswith('output:'):
+                        result = result[7:].strip()
+                    if 15 < len(result) < 200 and result not in variations:
+                        variations.append(result)
+        
+        # Fallback: add template-based variations if LLM didn't provide enough
+        if len(variations) < count:
+            templates = [
+                f"Create a Rego {rule_type} rule to {description.lower().rstrip('.')}",
+                f"I need to {description.lower().rstrip('.')}",
+                f"Write a rule that {description.lower().rstrip('.')}",
+                f"Verify that {description.lower().rstrip('.')}",
+            ]
+            for t in templates:
+                if len(variations) >= count:
+                    break
+                if t not in variations and len(t) > 20:
+                    variations.append(t)
+        
+        return variations[:count]
+    
+    def process_all_rules(
+        self, 
+        augment: bool = False, 
+        variations_per_rule: int = 4
+    ) -> Tuple[List[Stage1Example], List[Stage2Example]]:
+        """Process all rules in policy/release and generate training examples.
+        
+        Args:
+            augment: If True, generate multiple instruction variations per rule
+            variations_per_rule: Number of variations to generate (if augment=True)
+        """
         stage1_examples = []
         stage2_examples = []
         
@@ -1170,6 +1244,8 @@ Write ONLY the bullet points, no introduction or conclusion:"""
         ]
         
         print(f"\nProcessing {len(rego_files)} Rego files...")
+        if augment:
+            print(f"  Data augmentation: {variations_per_rule} variations per rule")
         
         for rego_file in rego_files:
             rel_path = rego_file.relative_to(POLICY_RELEASE_DIR)
@@ -1180,17 +1256,48 @@ Write ONLY the bullet points, no introduction or conclusion:"""
             
             for rule in rules:
                 try:
-                    # Generate Stage 1 example
-                    stage1 = self.generate_stage1_example(rule)
-                    stage1_examples.append(stage1)
-                    
-                    # Generate Stage 2 example
-                    stage2 = self.generate_stage2_example(rule, stage1)
-                    stage2_examples.append(stage2)
+                    if augment:
+                        # Generate multiple variations
+                        variations = self._generate_instruction_variations(
+                            rule.metadata, rule.rule_type, variations_per_rule
+                        )
+                        
+                        for instruction in variations:
+                            # Generate Stage 1 example with this instruction
+                            stage1 = self._generate_stage1_with_instruction(rule, instruction)
+                            stage1_examples.append(stage1)
+                            
+                            # Generate Stage 2 example
+                            stage2 = self.generate_stage2_example(rule, stage1)
+                            stage2_examples.append(stage2)
+                    else:
+                        # Original behavior: one example per rule
+                        stage1 = self.generate_stage1_example(rule)
+                        stage1_examples.append(stage1)
+                        
+                        stage2 = self.generate_stage2_example(rule, stage1)
+                        stage2_examples.append(stage2)
+                        
                 except Exception as e:
                     print(f"    Error processing rule in {rel_path}: {e}")
         
         return stage1_examples, stage2_examples
+    
+    def _generate_stage1_with_instruction(self, rule: ExtractedRule, instruction: str) -> Stage1Example:
+        """Generate Stage 1 example with a specific instruction."""
+        # Reuse the standard generation but override the instruction
+        requirements = self._generate_requirements(rule)
+        schema = self._infer_attestation_schema(rule)
+        helpers = self._generate_available_helpers(rule)
+        rule_data = self._extract_rule_data_keys(rule)
+        
+        return Stage1Example(
+            natural_instruction=instruction,
+            requirements=requirements,
+            attestation_schema=schema,
+            available_helpers=helpers,
+            rule_data_keys=rule_data,
+        )
 
 
 def save_examples(examples: list, output_path: Path, stage: int):
@@ -1224,15 +1331,42 @@ def save_examples(examples: list, output_path: Path, stage: int):
 
 def main():
     """Main entry point."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Generate two-stage training data")
+    parser.add_argument(
+        "--augment", 
+        action="store_true",
+        help="Enable data augmentation (multiple instruction variations per rule)"
+    )
+    parser.add_argument(
+        "--variations", 
+        type=int, 
+        default=4,
+        help="Number of instruction variations per rule (default: 4)"
+    )
+    parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Disable LLM for instruction/analysis generation"
+    )
+    args = parser.parse_args()
+    
     print("=" * 60)
     print("Two-Stage Training Data Generator")
     print("=" * 60)
     
+    if args.augment:
+        print(f"Data augmentation: ENABLED ({args.variations} variations/rule)")
+    
     # Initialize generator
-    generator = TwoStageDataGenerator(REPO_ROOT)
+    generator = TwoStageDataGenerator(REPO_ROOT, use_llm=not args.no_llm)
     
     # Process all rules - returns paired lists (stage1[i] corresponds to stage2[i])
-    stage1_examples, stage2_examples = generator.process_all_rules()
+    stage1_examples, stage2_examples = generator.process_all_rules(
+        augment=args.augment,
+        variations_per_rule=args.variations
+    )
     
     print(f"\nGenerated {len(stage1_examples)} Stage 1 examples")
     print(f"Generated {len(stage2_examples)} Stage 2 examples")
