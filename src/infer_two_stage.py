@@ -52,14 +52,14 @@ class TwoStageGenerator:
     # System prompt - Enhanced with Rego best practices
     SYSTEM_PROMPT = """You are an expert Rego policy assistant for Conforma/EC policies.
 
-Key patterns to follow:
-- Use `deny contains result if { ... }` (never `deny :=` or `deny = ...`)
+Key patterns:
+- Use `deny contains result if { ... }` (never `deny :=`)
 - Use `lib.result_helper(rego.metadata.chain(), [...])` for results
-- Use only helpers from AVAILABLE_HELPERS
+- Library helpers (lib.*, tekton.*, sbom.*) are from AVAILABLE_HELPERS
+- Create private helpers (prefixed with _) when needed for data access
 - Always include `import rego.v1`
-- Iterate collections with `some x in collection`
 
-Follow instructions carefully and provide accurate, well-structured Rego code."""
+Follow instructions carefully and provide complete, working Rego code."""
     
     # Fixed instruction for Stage 1 (model trained with this)
     STAGE1_INPUT_PROMPT = "Analyze the requirements and identify the attestation schema, available helpers, rule data keys, and suggest an appropriate package name and rule type (deny/warn) for this Rego rule."
@@ -69,12 +69,10 @@ Follow instructions carefully and provide accurate, well-structured Rego code.""
     
     # Optional: Pattern reminder for Stage 2 (appended after context)
     STAGE2_PATTERN_REMINDER = """
-Remember:
-- Package declaration and `import rego.v1` first
-- METADATA block with title, description, custom fields
-- Main rule: `deny contains result if { ... }`
-- Use `lib.result_helper(rego.metadata.chain(), [args])` for output
-- Only use helpers from AVAILABLE_HELPERS above"""
+Output format:
+ANALYSIS: Brief explanation of approach
+RULE: Complete Rego code (package, imports, helpers, METADATA, deny/warn rule)
+TESTS: Test functions with _mock fixtures for pass/fail cases"""
     
     def __init__(
         self,
