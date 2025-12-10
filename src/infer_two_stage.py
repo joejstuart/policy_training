@@ -49,17 +49,32 @@ except ImportError:
 class TwoStageGenerator:
     """Two-stage Rego policy generator."""
     
-    # System prompt - MUST MATCH training (train_policy.py line 161-163)
-    SYSTEM_PROMPT = (
-        "You are an expert Rego policy assistant. "
-        "Follow the instructions carefully and provide accurate, well-structured responses."
-    )
+    # System prompt - Enhanced with Rego best practices
+    SYSTEM_PROMPT = """You are an expert Rego policy assistant for Conforma/EC policies.
+
+Key patterns to follow:
+- Use `deny contains result if { ... }` (never `deny :=` or `deny = ...`)
+- Use `lib.result_helper(rego.metadata.chain(), [...])` for results
+- Use only helpers from AVAILABLE_HELPERS
+- Always include `import rego.v1`
+- Iterate collections with `some x in collection`
+
+Follow instructions carefully and provide accurate, well-structured Rego code."""
     
     # Fixed instruction for Stage 1 (model trained with this)
     STAGE1_INPUT_PROMPT = "Analyze the requirements and identify the attestation schema, available helpers, rule data keys, and suggest an appropriate package name and rule type (deny/warn) for this Rego rule."
     
     # Fixed instruction for Stage 2 (model trained with this)
     STAGE2_INSTRUCTION = "Write a Rego rule that enforces the requirements below using the provided context."
+    
+    # Optional: Pattern reminder for Stage 2 (appended after context)
+    STAGE2_PATTERN_REMINDER = """
+Remember:
+- Package declaration and `import rego.v1` first
+- METADATA block with title, description, custom fields
+- Main rule: `deny contains result if { ... }`
+- Use `lib.result_helper(rego.metadata.chain(), [args])` for output
+- Only use helpers from AVAILABLE_HELPERS above"""
     
     def __init__(
         self,
@@ -225,12 +240,16 @@ class TwoStageGenerator:
         context: str,
         max_tokens: int = 2048,
         temperature: float = 0.1,
+        use_pattern_reminder: bool = True,
     ) -> str:
         """
         Stage 2: Generate rule from requirements + context.
         
         Input: REQUIREMENTS + ATTESTATION_SCHEMA + AVAILABLE_HELPERS + RULE_DATA_KEYS
         Output: ANALYSIS + RULE + TESTS
+        
+        Args:
+            use_pattern_reminder: If True, append pattern hints to help model accuracy
         """
         if self.stage2_model is None:
             raise RuntimeError("Stage 2 model not loaded. Provide --stage2-model path.")
@@ -239,6 +258,11 @@ class TwoStageGenerator:
         # instruction + "\n" + input (where input = "REQUIREMENTS:\n..." + "\n\n" + context)
         # See: train_policy.py lines 169-177 and generate_two_stage_dataset.py Stage2Example.format_input()
         input_text = f"REQUIREMENTS:\n{requirements}\n\n{context}"
+        
+        # Optionally add pattern reminder for better accuracy
+        if use_pattern_reminder:
+            input_text += self.STAGE2_PATTERN_REMINDER
+        
         user_content = f"{self.STAGE2_INSTRUCTION}\n{input_text}"
         
         messages = self._build_messages(self.SYSTEM_PROMPT, user_content)
@@ -258,6 +282,7 @@ class TwoStageGenerator:
         max_tokens: int = 2048,
         temperature: float = 0.1,
         verbose: bool = True,
+        use_hints: bool = True,
     ) -> dict:
         """
         Full two-stage pipeline.
@@ -302,7 +327,8 @@ class TwoStageGenerator:
             requirements, 
             context, 
             max_tokens=max_tokens, 
-            temperature=temperature
+            temperature=temperature,
+            use_pattern_reminder=use_hints,
         )
         
         if verbose:
@@ -455,6 +481,11 @@ Examples:
         action="store_true",
         help="Minimal output",
     )
+    parser.add_argument(
+        "--no-hints",
+        action="store_true",
+        help="Disable pattern reminder hints for Stage 2 (use if model is well-trained)",
+    )
     
     args = parser.parse_args()
     
@@ -501,10 +532,10 @@ Examples:
                         continue
                     # Build structured requirements from context metadata
                     requirements = generator._build_structured_requirements(instruction, context)
-                    result = generator.generate_rule(requirements, context)
+                    result = generator.generate_rule(requirements, context, use_pattern_reminder=not args.no_hints)
                     print(f"\n{result}\n")
                 else:
-                    result = generator.generate(instruction, context=context, verbose=verbose)
+                    result = generator.generate(instruction, context=context, verbose=verbose, use_hints=not args.no_hints)
                     print(f"\n=== Result ===\n{result['output']}\n")
                     
             except EOFError:
@@ -541,6 +572,7 @@ Examples:
             context,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
+            use_pattern_reminder=not args.no_hints,
         )
         print(result)
         
@@ -552,6 +584,7 @@ Examples:
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             verbose=verbose,
+            use_hints=not args.no_hints,
         )
         
         if verbose:
