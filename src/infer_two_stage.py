@@ -72,7 +72,7 @@ class TwoStageGenerator:
         self,
         stage1_model_path: Optional[str] = None,
         stage2_model_path: Optional[str] = None,
-        base_model: str = "Qwen/Qwen2.5-1.5B-Instruct",
+        base_model: str = "Qwen/Qwen3-4B-Instruct-2057",
         device: str = "auto",
     ):
         self.device = self._detect_device(device)
