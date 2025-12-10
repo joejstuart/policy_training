@@ -72,7 +72,7 @@ class TwoStageGenerator:
         self,
         stage1_model_path: Optional[str] = None,
         stage2_model_path: Optional[str] = None,
-        base_model: str = "Qwen/Qwen3-4B-Instruct-2057",
+        base_model: str = "Qwen/Qwen3-4B-Instruct-2507",
         device: str = "auto",
     ):
         self.device = self._detect_device(device)
@@ -367,7 +367,7 @@ Examples:
     parser.add_argument(
         "--base-model",
         type=str,
-        default="Qwen/Qwen2.5-1.5B-Instruct",
+        default="Qwen/Qwen3-4B-Instruct-2507",
         help="Base model name for LoRA adapters",
     )
     parser.add_argument(
