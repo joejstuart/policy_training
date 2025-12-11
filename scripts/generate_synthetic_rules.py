@@ -49,16 +49,22 @@ STAGE1_SCHEMA_MAPPINGS = {
     },
     "tasks": {
         "schema": """- predicate.buildConfig.tasks[] (array of pipeline tasks)
-  example: {"name": "build-container", "status": "Succeeded", "ref": {...}, "results": [...]}
+  example: {"name": "build-container", "status": "Succeeded", "ref": {"bundle": "quay.io/task@sha256:...", "name": "buildah"}, "results": [...]}
   navigation: `some task in tekton.tasks(att)`
   - task.name: Task name
   - task.status: Task execution status (Succeeded, Failed, etc.)
   - task.ref: Task reference with resolver params
-  - task.results[]: Array of task results""",
+  - task.ref.bundle: Bundle image reference (may include @sha256: digest)
+  - task.ref.name: Task name in bundle
+  - task.results[]: Array of task results
+  
+  Bundle pinning: Use `tekton.task_ref(task).pinned` to check if task uses immutable digest.
+  Example: `not tekton.task_ref(task).pinned` (denies unpinned tasks)""",
         "helpers": """- lib.pipelinerun_attestations: Returns all PipelineRun attestations
 - tekton.tasks(att): Returns all tasks from attestation
 - tekton.task_name(task): Returns task name
-- tekton.task_ref(task): Returns task reference info (pinned, key, etc.)
+- tekton.task_ref(task): Returns task reference info with .pinned, .bundle, .name, .kind
+- tekton.task_ref(task).pinned: Boolean - true if task bundle is pinned to immutable digest
 - tekton.task_param(task, name): Returns task parameter value
 - lib.result_helper(chain, terms): Creates violation result""",
     },
@@ -73,11 +79,17 @@ STAGE1_SCHEMA_MAPPINGS = {
     },
     "build_tasks": {
         "schema": """- predicate.buildConfig.tasks[] filtered to build tasks
+  example: {"name": "buildah", "status": "Succeeded", "ref": {"bundle": "quay.io/task@sha256:..."}, "results": [...]}
   navigation: `some task in tekton.build_tasks(att)`
-  - task.name, task.status, task.ref, task.results[]""",
+  - task.name, task.status, task.ref, task.results[]
+  - task.ref.bundle: Bundle image reference
+  - task.ref.pinned: Boolean for immutable reference
+  
+  Bundle pinning: `tekton.task_ref(task).pinned` checks if bundle uses digest.""",
         "helpers": """- lib.pipelinerun_attestations: Returns all PipelineRun attestations
 - tekton.build_tasks(att): Returns build tasks (buildah, etc.)
 - tekton.task_name(task): Returns task name
+- tekton.task_ref(task): Returns task reference with .pinned, .bundle, .name
 - tekton.task_param(task, name): Returns task parameter value
 - lib.result_helper(chain, terms): Creates violation result""",
     },
@@ -107,33 +119,45 @@ STAGE1_SCHEMA_MAPPINGS = {
     },
     "spdx_packages": {
         "schema": """- SPDX SBOM packages array
-  example: {"name": "golang", "SPDXID": "SPDXRef-Package-...", "versionInfo": "1.21", ...}
+  example: {"name": "golang", "SPDXID": "SPDXRef-Package-...", "versionInfo": "1.21", "licenseConcluded": "Apache-2.0", ...}
   navigation: `some pkg in s.packages`
   - pkg.name: Package name
   - pkg.SPDXID: SPDX identifier
   - pkg.versionInfo: Package version
+  - pkg.licenseConcluded: Concluded license (SPDX license ID or NOASSERTION)
+  - pkg.licenseDeclared: Declared license (SPDX license ID or NOASSERTION)
   - pkg.downloadLocation: Where package was obtained
-  - pkg.licenseConcluded: Concluded license
-  - pkg.licenseDeclared: Declared license
   - pkg.supplier: Package supplier
-  - pkg.externalRefs[]: External references (PURLs, CPEs)""",
+  - pkg.copyrightText: Copyright information
+  - pkg.externalRefs[]: External references (PURLs, CPEs)
+  
+  License checking: Use pkg.licenseConcluded or pkg.licenseDeclared directly.
+  Example: `pkg.licenseConcluded in {"GPL-2.0-only", "GPL-3.0-only"}`
+  Example: `contains(pkg.licenseConcluded, "GPL")`""",
         "helpers": """- sbom.spdx_sboms: Returns all SPDX SBOMs
-- lib.rule_data(key): Retrieves configurable policy data (e.g., disallowed_packages, allowed_licenses)
+- lib.rule_data(key): Retrieves configurable policy data (e.g., disallowed_packages, disallowed_licenses)
 - lib.result_helper(chain, terms): Creates violation result""",
     },
     "cyclonedx_components": {
         "schema": """- CycloneDX SBOM components array
-  example: {"name": "golang", "version": "1.21", "purl": "pkg:golang/...", "type": "library"}
+  example: {"name": "golang", "version": "1.21", "purl": "pkg:golang/...", "type": "library", "licenses": [{"license": {"id": "Apache-2.0"}}]}
   navigation: `some component in s.components`
   - component.name: Component name
   - component.version: Component version
   - component.purl: Package URL
   - component.type: Component type (library, application, container, etc.)
-  - component.licenses[]: License information
+  - component.licenses[]: Array of license objects
+    - license.license.id: SPDX license ID (e.g., "Apache-2.0", "GPL-3.0-only")
+    - license.license.name: License name (if not SPDX ID)
+    - license.expression: SPDX license expression
   - component.externalReferences[]: External references
-  - component.properties[]: Component properties""",
+  - component.properties[]: Component properties
+  
+  License checking: Iterate over component.licenses array.
+  Example: `some license in component.licenses; license.license.id in {"GPL-2.0-only"}`
+  Example: `some license in component.licenses; contains(license.license.id, "GPL")`""",
         "helpers": """- sbom.cyclonedx_sboms: Returns all CycloneDX SBOMs
-- lib.rule_data(key): Retrieves configurable policy data (e.g., disallowed_packages, allowed_licenses)
+- lib.rule_data(key): Retrieves configurable policy data (e.g., disallowed_packages, disallowed_licenses)
 - ec.purl.parse(purl): Parses a PURL string into components (type, namespace, name, version)
 - lib.result_helper(chain, terms): Creates violation result""",
     },
@@ -338,13 +362,40 @@ CONDITION_TEMPLATES = [
         result_terms=["material.uri", "material.digest.sha1"],
     ),
     
-    # Task conditions
+    # Task conditions - Bundle/Reference Pinning (multiple phrasings)
     ConditionTemplate(
         pattern="not tekton.task_ref(task).pinned",
         description="task reference is not pinned to immutable digest",
         applicable_sources=["tasks", "pre_build_tasks", "build_tasks"],
         result_terms=["tekton.task_name(task)", "tekton.pipeline_task_name(task)"],
         negated=True,
+    ),
+    ConditionTemplate(
+        pattern="not tekton.task_ref(task).pinned",
+        description="Tekton task bundle is not pinned to a digest",
+        applicable_sources=["tasks", "build_tasks"],
+        result_terms=["tekton.task_name(task)"],
+        negated=True,
+    ),
+    ConditionTemplate(
+        pattern="not tekton.task_ref(task).pinned",
+        description="task bundle uses mutable tag instead of digest",
+        applicable_sources=["tasks", "build_tasks"],
+        result_terms=["tekton.task_name(task)"],
+        negated=True,
+    ),
+    ConditionTemplate(
+        pattern="not tekton.task_ref(task).pinned",
+        description="task is using unpinned bundle reference",
+        applicable_sources=["tasks", "build_tasks"],
+        result_terms=["tekton.task_name(task)"],
+        negated=True,
+    ),
+    ConditionTemplate(
+        pattern='ref := tekton.task_ref(task)\n\tnot contains(ref.bundle, "@sha256:")',
+        description="task bundle is not pinned with sha256 digest",
+        applicable_sources=["tasks", "build_tasks"],
+        result_terms=["tekton.task_name(task)", "ref.bundle"],
     ),
     ConditionTemplate(
         pattern='tekton.task_param(task, "HERMETIC") != "true"',
@@ -466,6 +517,66 @@ CONDITION_TEMPLATES = [
     # SBOM PACKAGE DISALLOWED/ALLOWLIST CONDITIONS
     # =============================================================================
     
+    # =============================================================================
+    # SBOM FIELD VALIDATION CONDITIONS (missing/empty fields)
+    # =============================================================================
+    
+    # SPDX: Version field validation (more examples to balance disallowed_packages)
+    ConditionTemplate(
+        pattern='not pkg.versionInfo',
+        description="SBOM package is missing version information",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name", "pkg.SPDXID"],
+        negated=True,
+    ),
+    ConditionTemplate(
+        pattern='pkg.versionInfo == ""',
+        description="SBOM package has empty version",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name"],
+    ),
+    ConditionTemplate(
+        pattern='pkg.versionInfo == "NOASSERTION"',
+        description="SBOM package version is not specified",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name"],
+    ),
+    
+    # CycloneDX: Version field validation
+    ConditionTemplate(
+        pattern='not component.version',
+        description="SBOM component is missing version",
+        applicable_sources=["cyclonedx_components"],
+        result_terms=["component.name", "component.purl"],
+        negated=True,
+    ),
+    ConditionTemplate(
+        pattern='component.version == ""',
+        description="SBOM component has empty version field",
+        applicable_sources=["cyclonedx_components"],
+        result_terms=["component.name"],
+    ),
+    
+    # Required field validation patterns
+    ConditionTemplate(
+        pattern='not pkg.name\n\tnot pkg.versionInfo',
+        description="SBOM package is missing required name and version fields",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.SPDXID"],
+        negated=True,
+    ),
+    ConditionTemplate(
+        pattern='not component.name\n\tnot component.version',
+        description="SBOM component is missing required name and version",
+        applicable_sources=["cyclonedx_components"],
+        result_terms=["component.purl"],
+        negated=True,
+    ),
+    
+    # =============================================================================
+    # SBOM PACKAGE DISALLOWED/ALLOWLIST CONDITIONS
+    # =============================================================================
+    
     # SPDX: Disallowed packages (the missing pattern!)
     ConditionTemplate(
         pattern='pkg.name in lib.rule_data("disallowed_packages")',
@@ -581,7 +692,11 @@ CONDITION_TEMPLATES = [
     # SBOM LICENSE/SECURITY CONDITIONS
     # =============================================================================
     
-    # SPDX: License checking
+    # =============================================================================
+    # SPDX LICENSE CHECKING (use licenseConcluded/licenseDeclared, NOT externalRefs)
+    # =============================================================================
+    
+    # SPDX: Disallowed licenses via rule_data
     ConditionTemplate(
         pattern='pkg.licenseConcluded in lib.rule_data("disallowed_licenses")',
         description="package uses a disallowed license",
@@ -589,22 +704,120 @@ CONDITION_TEMPLATES = [
         result_terms=["pkg.name", "pkg.licenseConcluded"],
     ),
     ConditionTemplate(
+        pattern='pkg.licenseDeclared in lib.rule_data("disallowed_licenses")',
+        description="package declares a disallowed license",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name", "pkg.licenseDeclared"],
+    ),
+    
+    # SPDX: Allowlist checking
+    ConditionTemplate(
         pattern='allowed_licenses := lib.rule_data("allowed_licenses")\n\tcount(allowed_licenses) > 0\n\tnot pkg.licenseConcluded in allowed_licenses',
         description="package license is not in allowed list",
         applicable_sources=["spdx_packages"],
         result_terms=["pkg.name", "pkg.licenseConcluded"],
     ),
+    
+    # SPDX: GPL license detection (using contains for partial match)
     ConditionTemplate(
         pattern='contains(pkg.licenseConcluded, "GPL")\n\tnot contains(pkg.licenseConcluded, "LGPL")',
         description="package uses GPL license (copyleft)",
         applicable_sources=["spdx_packages"],
         result_terms=["pkg.name", "pkg.licenseConcluded"],
     ),
-    
-    # CycloneDX: License checking
     ConditionTemplate(
-        pattern='some license in component.licenses\n\tlicense.id in lib.rule_data("disallowed_licenses")',
+        pattern='contains(pkg.licenseDeclared, "GPL")\n\tnot contains(pkg.licenseDeclared, "LGPL")',
+        description="package declares GPL license",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name", "pkg.licenseDeclared"],
+    ),
+    
+    # SPDX: Specific license set membership (use `in {set}` pattern)
+    ConditionTemplate(
+        pattern='pkg.licenseConcluded in {"GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"}',
+        description="package uses a GPL family license",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name", "pkg.licenseConcluded"],
+    ),
+    ConditionTemplate(
+        pattern='pkg.licenseConcluded in {"AGPL-3.0-only", "AGPL-3.0-or-later"}',
+        description="package uses AGPL license (strong copyleft)",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name", "pkg.licenseConcluded"],
+    ),
+    ConditionTemplate(
+        pattern='not pkg.licenseConcluded in {"Apache-2.0", "MIT", "BSD-2-Clause", "BSD-3-Clause", "ISC"}',
+        description="package does not use a permissive open source license",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name", "pkg.licenseConcluded"],
+        negated=True,
+    ),
+    
+    # SPDX: Proprietary/unknown license detection
+    ConditionTemplate(
+        pattern='pkg.licenseConcluded == "NOASSERTION"\n\tpkg.licenseDeclared == "NOASSERTION"',
+        description="package has no license information",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name"],
+    ),
+    ConditionTemplate(
+        pattern='startswith(pkg.licenseConcluded, "LicenseRef-")',
+        description="package uses a custom/proprietary license",
+        applicable_sources=["spdx_packages"],
+        result_terms=["pkg.name", "pkg.licenseConcluded"],
+    ),
+    
+    # =============================================================================
+    # CYCLONEDX LICENSE CHECKING
+    # =============================================================================
+    
+    # CycloneDX: Disallowed licenses
+    ConditionTemplate(
+        pattern='some license in component.licenses\n\tlicense.license.id in lib.rule_data("disallowed_licenses")',
         description="component uses a disallowed license",
+        applicable_sources=["cyclonedx_components"],
+        result_terms=["component.name"],
+    ),
+    ConditionTemplate(
+        pattern='some license in component.licenses\n\tlicense.license.name in lib.rule_data("disallowed_license_names")',
+        description="component uses a disallowed license by name",
+        applicable_sources=["cyclonedx_components"],
+        result_terms=["component.name"],
+    ),
+    
+    # CycloneDX: GPL detection
+    ConditionTemplate(
+        pattern='some license in component.licenses\n\tcontains(license.license.id, "GPL")\n\tnot contains(license.license.id, "LGPL")',
+        description="component uses GPL license",
+        applicable_sources=["cyclonedx_components"],
+        result_terms=["component.name"],
+    ),
+    ConditionTemplate(
+        pattern='some license in component.licenses\n\tlicense.license.id in {"GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"}',
+        description="component uses a GPL family license",
+        applicable_sources=["cyclonedx_components"],
+        result_terms=["component.name"],
+    ),
+    
+    # CycloneDX: Missing/unknown license
+    ConditionTemplate(
+        pattern='not component.licenses',
+        description="component has no license information",
+        applicable_sources=["cyclonedx_components"],
+        result_terms=["component.name"],
+        negated=True,
+    ),
+    ConditionTemplate(
+        pattern='count(component.licenses) == 0',
+        description="component has empty licenses array",
+        applicable_sources=["cyclonedx_components"],
+        result_terms=["component.name"],
+    ),
+    
+    # CycloneDX: License expression parsing
+    ConditionTemplate(
+        pattern='some license in component.licenses\n\tlicense.expression\n\tcontains(license.expression, "GPL")',
+        description="component license expression contains GPL",
         applicable_sources=["cyclonedx_components"],
         result_terms=["component.name"],
     ),
