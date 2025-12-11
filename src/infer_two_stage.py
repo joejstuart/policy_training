@@ -49,17 +49,11 @@ except ImportError:
 class TwoStageGenerator:
     """Two-stage Rego policy generator."""
     
-    # System prompt - Enhanced with Rego best practices
-    SYSTEM_PROMPT = """You are an expert Rego policy assistant for Conforma/EC policies.
-
-Key patterns:
-- Use `deny contains result if { ... }` (never `deny :=`)
-- Use `lib.result_helper(rego.metadata.chain(), [...])` for results
-- Library helpers (lib.*, tekton.*, sbom.*) are from AVAILABLE_HELPERS
-- Create private helpers (prefixed with _) when needed for data access
-- Always include `import rego.v1`
-
-Follow instructions carefully and provide complete, working Rego code."""
+    # System prompt - MUST MATCH training exactly (train_policy.py)
+    SYSTEM_PROMPT = (
+        "You are an expert Rego policy assistant. "
+        "Follow the instructions carefully and provide accurate, well-structured responses."
+    )
     
     # Fixed instruction for Stage 1 (model trained with this)
     STAGE1_INPUT_PROMPT = "Analyze the requirements and identify the attestation schema, available helpers, rule data keys, and suggest an appropriate package name and rule type (deny/warn) for this Rego rule."
@@ -238,7 +232,7 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
         context: str,
         max_tokens: int = 2048,
         temperature: float = 0.1,
-        use_pattern_reminder: bool = True,
+        use_pattern_reminder: bool = False,  # Disabled by default - not in training data
     ) -> str:
         """
         Stage 2: Generate rule from requirements + context.
@@ -280,7 +274,7 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
         max_tokens: int = 2048,
         temperature: float = 0.1,
         verbose: bool = True,
-        use_hints: bool = True,
+        use_hints: bool = False,  # Disabled by default - not in training data
     ) -> dict:
         """
         Full two-stage pipeline.
@@ -480,9 +474,9 @@ Examples:
         help="Minimal output",
     )
     parser.add_argument(
-        "--no-hints",
+        "--use-hints",
         action="store_true",
-        help="Disable pattern reminder hints for Stage 2 (use if model is well-trained)",
+        help="Enable pattern reminder hints for Stage 2 (experimental, not in training data)",
     )
     
     args = parser.parse_args()
@@ -530,10 +524,10 @@ Examples:
                         continue
                     # Build structured requirements from context metadata
                     requirements = generator._build_structured_requirements(instruction, context)
-                    result = generator.generate_rule(requirements, context, use_pattern_reminder=not args.no_hints)
+                    result = generator.generate_rule(requirements, context, use_pattern_reminder=args.use_hints)
                     print(f"\n{result}\n")
                 else:
-                    result = generator.generate(instruction, context=context, verbose=verbose, use_hints=not args.no_hints)
+                    result = generator.generate(instruction, context=context, verbose=verbose, use_hints=args.use_hints)
                     print(f"\n=== Result ===\n{result['output']}\n")
                     
             except EOFError:
@@ -570,7 +564,7 @@ Examples:
             context,
             max_tokens=args.max_tokens,
             temperature=args.temperature,
-            use_pattern_reminder=not args.no_hints,
+            use_pattern_reminder=args.use_hints,
         )
         print(result)
         
@@ -582,7 +576,7 @@ Examples:
             max_tokens=args.max_tokens,
             temperature=args.temperature,
             verbose=verbose,
-            use_hints=not args.no_hints,
+            use_hints=args.use_hints,
         )
         
         if verbose:

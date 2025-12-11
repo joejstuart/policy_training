@@ -256,6 +256,7 @@ class Stage1Example:
     rule_data_keys: str
     suggested_package: str = ""  # Suggested package name for the rule
     suggested_rule_type: str = "deny"  # deny or warn
+    navigation_hints: str = ""  # Navigation patterns used in this rule
     
     def format_instruction(self) -> str:
         """The natural language instruction (user-facing, varied)."""
@@ -271,6 +272,9 @@ class Stage1Example:
         parts.append(f"\nAVAILABLE_HELPERS:\n{self.available_helpers}")
         if self.rule_data_keys:
             parts.append(f"\nRULE_DATA_KEYS:\n{self.rule_data_keys}")
+        # Add navigation hints to help Stage 2 generate correct iteration patterns
+        if self.navigation_hints:
+            parts.append(f"\nNAVIGATION_HINTS:\n{self.navigation_hints}")
         # Add suggested metadata for Stage 2 requirements
         parts.append(f"\nSUGGESTED_PACKAGE: {self.suggested_package}")
         parts.append(f"SUGGESTED_RULE_TYPE: {self.suggested_rule_type}")
@@ -693,14 +697,17 @@ class TwoStageDataGenerator:
         # Generate REQUIREMENTS (structured, for reference)
         requirements = self._generate_requirements(rule)
         
-        # Generate ATTESTATION_SCHEMA (infer from rule code)
+        # Generate ATTESTATION_SCHEMA (infer from rule code, now with examples)
         schema = self._infer_attestation_schema(rule)
         
-        # Generate AVAILABLE_HELPERS (from library indexer)
+        # Generate AVAILABLE_HELPERS (from library indexer, now with signatures)
         helpers = self._generate_available_helpers(rule)
         
         # Generate RULE_DATA_KEYS
         rule_data = self._extract_rule_data_keys(rule)
+        
+        # Generate NAVIGATION_HINTS (patterns for navigating attestations)
+        navigation_hints = self._generate_navigation_hints(rule)
         
         return Stage1Example(
             natural_instruction=natural_instruction,
@@ -710,6 +717,7 @@ class TwoStageDataGenerator:
             rule_data_keys=rule_data,
             suggested_package=rule.package,
             suggested_rule_type=rule.rule_type,
+            navigation_hints=navigation_hints,
         )
     
     def generate_stage2_example(self, rule: ExtractedRule, stage1: Stage1Example) -> Stage2Example:
@@ -784,6 +792,77 @@ class TwoStageDataGenerator:
                 lines.append(f"- Error message: {msg}")
         
         return '\n'.join(lines)
+    
+    # Concrete JSON examples and navigation patterns for each schema path
+    # These ground the abstract schema paths with real examples to improve accuracy
+    _SCHEMA_EXAMPLES = {
+        # PipelineRun attestation
+        ".statement.predicate (PipelineRun attestation)": {
+            "example": '{"buildType": "https://tekton.dev/chains/v2/slsa", "buildConfig": {"tasks": [...]}}',
+            "navigation": "some att in lib.pipelinerun_attestations",
+        },
+        ".statement.predicate (SLSA Provenance)": {
+            "example": '{"buildType": "...", "builder": {"id": "..."}, "buildConfig": {...}}',
+            "navigation": "some att in lib.slsa_provenance_attestations",
+        },
+        # Task-level paths
+        ".statement.predicate.buildConfig.tasks[]": {
+            "example": '{"name": "build-container", "status": "Succeeded", "ref": {"bundle": "..."}, "results": [...]}',
+            "navigation": "some task in tekton.tasks(att)",
+        },
+        ".statement.predicate.buildConfig.tasks[].ref": {
+            "example": '{"bundle": "quay.io/org/task:v1", "name": "build", "kind": "Task"}',
+            "navigation": "ref := tekton.task_ref(task)",
+        },
+        ".statement.predicate.buildConfig.tasks[].results[]": {
+            "example": '{"name": "IMAGE_DIGEST", "value": "sha256:abc123...", "type": "string"}',
+            "navigation": "some r in task.results  # use 'r' not 'result' to avoid shadowing",
+        },
+        ".statement.predicate.buildConfig.tasks[].params[]": {
+            "example": '{"name": "DOCKERFILE", "value": "./Dockerfile"}',
+            "navigation": "some param in tekton.task_params(task)",
+        },
+        # Materials
+        ".statement.predicate.materials[]": {
+            "example": '{"uri": "git+https://github.com/org/repo", "digest": {"sha1": "abc123..."}}',
+            "navigation": "some material in att.statement.predicate.materials",
+        },
+        # Builder
+        ".statement.predicate.builder": {
+            "example": '{"id": "https://tekton.dev/chains/v2"}',
+            "navigation": "builder := att.statement.predicate.builder",
+        },
+        # SBOM structures
+        "CycloneDX SBOM structure": {
+            "example": '{"bomFormat": "CycloneDX", "components": [{"name": "...", "purl": "pkg:..."}]}',
+            "navigation": "some sbom in sbom.cyclonedx_sboms\nsome component in sbom.components",
+        },
+        "SPDX SBOM structure": {
+            "example": '{"spdxVersion": "SPDX-2.3", "packages": [{"name": "...", "externalRefs": [...]}]}',
+            "navigation": "some sbom in sbom.spdx_sboms\nsome pkg in sbom.packages",
+        },
+        "CycloneDX/SPDX SBOM structure": {
+            "example": '{"components": [...]} or {"packages": [...]}',
+            "navigation": "some sbom in sbom.all_sboms",
+        },
+        # Image accessors
+        "input.image.ref (image reference)": {
+            "example": '"quay.io/org/image@sha256:abc123..."',
+            "navigation": "ref := input.image.ref",
+        },
+        "input.image.config (image configuration)": {
+            "example": '{"config": {"Labels": {"version": "1.0"}}, "rootfs": {...}}',
+            "navigation": "config := input.image.config\nlabels := config.config.Labels",
+        },
+        "input.image.signatures[] (Sigstore/Fulcio certificates)": {
+            "example": '{"certificate": {"Extensions": [...], "Subject": {...}}}',
+            "navigation": "some sig in input.image.signatures",
+        },
+        "input.image.files (OCI image filesystem)": {
+            "example": '[{"path": "/app/file.txt", "content": "..."}]',
+            "navigation": "some file in image.files(input.image)",
+        },
+    }
     
     # Static schema mappings for rules with complex/indirect attestation access
     _SCHEMA_OVERRIDES = {
@@ -917,16 +996,22 @@ class TwoStageDataGenerator:
     }
     
     def _enrich_schema(self, schema_line: str) -> str:
-        """Enrich a schema description with detailed paths."""
+        """Enrich a schema description with detailed paths, examples, and navigation."""
         desc = schema_line.strip().lstrip('-').strip()
+        enriched = [f"- {desc}"]
         
+        # Add concrete example and navigation pattern if available
+        if desc in self._SCHEMA_EXAMPLES:
+            ex = self._SCHEMA_EXAMPLES[desc]
+            enriched.append(f"  example: {ex['example']}")
+            enriched.append(f"  navigation: `{ex['navigation']}`")
+        
+        # Add sub-paths from enrichments
         if desc in self._SCHEMA_ENRICHMENTS:
-            enriched = [f"- {desc}"]
-            for path in self._SCHEMA_ENRICHMENTS[desc][:5]:
+            for path in self._SCHEMA_ENRICHMENTS[desc][:4]:  # Limit to 4 sub-paths
                 enriched.append(f"  - {path}")
-            return '\n'.join(enriched)
         
-        return f"- {desc}"
+        return '\n'.join(enriched)
     
     def _infer_attestation_schema(self, rule: ExtractedRule) -> str:
         """Infer attestation schema paths from rule code."""
@@ -1009,8 +1094,82 @@ class TwoStageDataGenerator:
         
         return '\n'.join(paths)
     
+    # Common helper signatures and usage examples for helpers that may not be in indexer
+    _HELPER_INFO = {
+        "lib.result_helper": {
+            "signature": "result_helper(chain, terms)",
+            "usage": "result := lib.result_helper(rego.metadata.chain(), [task.name])",
+            "description": "Creates violation result with metadata from chain and terms for message formatting",
+        },
+        "lib.result_helper_with_term": {
+            "signature": "result_helper_with_term(chain, terms, term)",
+            "usage": "result := lib.result_helper_with_term(rego.metadata.chain(), [name], name)",
+            "description": "Creates result with an additional searchable term field",
+        },
+        "lib.pipelinerun_attestations": {
+            "signature": "pipelinerun_attestations",
+            "usage": "some att in lib.pipelinerun_attestations",
+            "description": "Returns all PipelineRun SLSA Provenance attestations",
+        },
+        "lib.rule_data": {
+            "signature": "rule_data(key)",
+            "usage": 'allowed := lib.rule_data("allowed_values")',
+            "description": "Retrieves configurable policy data by key name",
+        },
+        "lib.pipeline_intention_match": {
+            "signature": "pipeline_intention_match(chain)",
+            "usage": "lib.pipeline_intention_match(rego.metadata.chain())",
+            "description": "Checks if current pipeline intention matches rule's allowed intentions",
+        },
+        "tekton.tasks": {
+            "signature": "tasks(attestation)",
+            "usage": "some task in tekton.tasks(att)",
+            "description": "Returns all tasks from a PipelineRun attestation",
+        },
+        "tekton.task_result": {
+            "signature": "task_result(task, name)",
+            "usage": 'digest := tekton.task_result(task, "IMAGE_DIGEST")',
+            "description": "Gets a specific result value from a task by name",
+        },
+        "tekton.task_results": {
+            "signature": "task_results(task)",
+            "usage": "results := tekton.task_results(task)",
+            "description": "Returns all results from a task as an object",
+        },
+        "tekton.task_param": {
+            "signature": "task_param(task, name)",
+            "usage": 'value := tekton.task_param(task, "DOCKERFILE")',
+            "description": "Gets a specific parameter value from a task by name",
+        },
+        "tekton.task_ref": {
+            "signature": "task_ref(task)",
+            "usage": "ref := tekton.task_ref(task)",
+            "description": "Returns the task reference (bundle, name, kind)",
+        },
+        "tekton.build_tasks": {
+            "signature": "build_tasks(attestation)",
+            "usage": "some task in tekton.build_tasks(att)",
+            "description": "Returns tasks that are classified as build tasks",
+        },
+        "sbom.cyclonedx_sboms": {
+            "signature": "cyclonedx_sboms",
+            "usage": "some sbom in sbom.cyclonedx_sboms",
+            "description": "Returns all CycloneDX format SBOMs",
+        },
+        "sbom.spdx_sboms": {
+            "signature": "spdx_sboms",
+            "usage": "some sbom in sbom.spdx_sboms",
+            "description": "Returns all SPDX format SBOMs",
+        },
+        "image.config": {
+            "signature": "config(image)",
+            "usage": "config := image.config(input.image)",
+            "description": "Returns the OCI image configuration",
+        },
+    }
+    
     def _generate_available_helpers(self, rule: ExtractedRule) -> str:
-        """Generate AVAILABLE_HELPERS section from library functions used."""
+        """Generate AVAILABLE_HELPERS section with signatures and usage examples."""
         code = rule.get_complete_code()
         helpers_used = []
         
@@ -1025,25 +1184,43 @@ class TwoStageDataGenerator:
                 continue
             seen.add(full_name)
             
+            # Check static helper info first (most accurate)
+            if full_name in self._HELPER_INFO:
+                info = self._HELPER_INFO[full_name]
+                helper_entry = [f"- name: {full_name}"]
+                helper_entry.append(f"  signature: {info['signature']}")
+                helper_entry.append(f"  usage: `{info['usage']}`")
+                helper_entry.append(f"  description: {info['description']}")
+                helpers_used.append('\n'.join(helper_entry))
+                continue
+            
             # Try to get info from indexer
-            # The indexer stores by function name without module prefix
-            desc = None
+            helper_info = None
             if func in self.indexer.index:
                 helper_info = self.indexer.index[func]
-                desc = helper_info.doc
-            
-            # Also try with common prefixes
-            if not desc:
+            else:
+                # Also try with common prefixes
                 for try_name in [func, f"{func}_", f"_{func}"]:
                     if try_name in self.indexer.index:
                         helper_info = self.indexer.index[try_name]
-                        desc = helper_info.doc
                         break
             
-            if desc:
-                # Truncate long descriptions
-                desc = desc[:150].rstrip() + ("..." if len(desc) > 150 else "")
-                helpers_used.append(f"- name: {full_name}\n  description: {desc}")
+            if helper_info:
+                helper_entry = [f"- name: {full_name}"]
+                # Add signature if available
+                if helper_info.signature:
+                    sig = helper_info.signature[:100] if len(helper_info.signature) > 100 else helper_info.signature
+                    helper_entry.append(f"  signature: {sig}")
+                # Add usage example if available
+                if helper_info.usage_examples:
+                    usage = helper_info.usage_examples[0][:80] if helper_info.usage_examples else None
+                    if usage:
+                        helper_entry.append(f"  usage: `{usage}`")
+                # Add description
+                if helper_info.doc:
+                    desc = helper_info.doc[:120].rstrip() + ("..." if len(helper_info.doc) > 120 else "")
+                    helper_entry.append(f"  description: {desc}")
+                helpers_used.append('\n'.join(helper_entry))
             else:
                 helpers_used.append(f"- name: {full_name}")
         
@@ -1071,6 +1248,80 @@ class TwoStageDataGenerator:
             lines.append(f"- {key}")
         
         return '\n'.join(lines)
+    
+    def _generate_navigation_hints(self, rule: ExtractedRule) -> str:
+        """Generate navigation pattern hints from rule code.
+        
+        These hints show the model the idiomatic Rego patterns for navigating
+        attestations, helping it generate correct iteration and access code.
+        """
+        code = rule.get_complete_code()
+        hints = []
+        
+        # Detect attestation entry points
+        if 'lib.pipelinerun_attestations' in code:
+            hints.append("- Attestation iteration: `some att in lib.pipelinerun_attestations`")
+        elif 'lib.slsa_provenance_attestations' in code:
+            hints.append("- Attestation iteration: `some att in lib.slsa_provenance_attestations`")
+        
+        # Detect task iteration patterns
+        if 'tekton.tasks(' in code:
+            hints.append("- Task iteration: `some task in tekton.tasks(att)`")
+        elif re.search(r'buildConfig\.tasks', code):
+            hints.append("- Task iteration: `some task in att.statement.predicate.buildConfig.tasks`")
+        
+        # Detect result iteration (note: use 'r' not 'result')
+        if re.search(r'some\s+r\s+in.*results', code) or 'task.results' in code:
+            hints.append("- Result iteration: `some r in task.results` (use 'r' to avoid shadowing 'result')")
+        
+        # Detect task helpers
+        if 'tekton.task_result(' in code:
+            hints.append("- Task result access: `value := tekton.task_result(task, \"RESULT_NAME\")`")
+        if 'tekton.task_param(' in code or 'tekton.task_params(' in code:
+            hints.append("- Task param access: `params := tekton.task_params(task)`")
+        if 'tekton.task_ref(' in code:
+            hints.append("- Task ref access: `ref := tekton.task_ref(task)`")
+        
+        # Detect SBOM patterns
+        if 'sbom.cyclonedx_sboms' in code:
+            hints.append("- CycloneDX iteration: `some sbom in sbom.cyclonedx_sboms`")
+            if '.components' in code:
+                hints.append("- Component iteration: `some component in sbom.components`")
+        elif 'sbom.spdx_sboms' in code:
+            hints.append("- SPDX iteration: `some sbom in sbom.spdx_sboms`")
+            if '.packages' in code:
+                hints.append("- Package iteration: `some pkg in sbom.packages`")
+        elif 'sbom.all_sboms' in code:
+            hints.append("- All SBOMs: `some sbom in sbom.all_sboms`")
+        
+        # Detect image patterns
+        if 'input.image.config' in code or 'image.config(' in code:
+            hints.append("- Image config: `config := input.image.config` or `image.config(input.image)`")
+        if 'input.image.signatures' in code or 'image.signatures(' in code:
+            hints.append("- Signatures: `some sig in input.image.signatures`")
+        
+        # Detect universal quantification (every)
+        if 'every ' in code:
+            # Try to extract the actual every pattern
+            every_match = re.search(r'every\s+(\w+)\s+in\s+([^\s{]+)', code)
+            if every_match:
+                var, collection = every_match.groups()
+                hints.append(f"- Universal check: `every {var} in {collection} {{ ... }}`")
+            else:
+                hints.append("- Universal check: `every item in collection { condition }`")
+        
+        # Detect membership checks
+        if re.search(r'\s+in\s+\{[^}]+\}', code):
+            hints.append("- Membership test: `value in {opt1, opt2, opt3}`")
+        
+        # Detect result helper pattern
+        if 'lib.result_helper' in code:
+            if 'result_helper_with_term' in code:
+                hints.append("- Result output: `result := lib.result_helper_with_term(chain, [terms], term)`")
+            else:
+                hints.append("- Result output: `result := lib.result_helper(rego.metadata.chain(), [terms])`")
+        
+        return '\n'.join(hints) if hints else ""
     
     def _generate_analysis(self, rule: ExtractedRule) -> str:
         """Generate ANALYSIS section explaining field-to-logic mapping.
@@ -1499,6 +1750,7 @@ Output:"""
         schema = self._infer_attestation_schema(rule)
         helpers = self._generate_available_helpers(rule)
         rule_data = self._extract_rule_data_keys(rule)
+        navigation_hints = self._generate_navigation_hints(rule)
         
         return Stage1Example(
             natural_instruction=instruction,
@@ -1508,6 +1760,7 @@ Output:"""
             rule_data_keys=rule_data,
             suggested_package=rule.package,
             suggested_rule_type=rule.rule_type,
+            navigation_hints=navigation_hints,
         )
 
 
