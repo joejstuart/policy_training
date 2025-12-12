@@ -6,11 +6,23 @@ Stage 1: Natural language → Context (schema, helpers, rule_data_keys)
 Stage 2: Context + requirements → Rule + tests
 
 Usage:
-    # Full two-stage pipeline
+    # Full two-stage pipeline with fine-tuned Stage 1 model
     python src/infer_two_stage.py \
         --stage1-model models/stage1-context-inference \
         --stage2-model models/stage2-rule-generation \
         --instruction "Check that all pipeline tasks succeeded"
+
+    # RAG mode: Use knowledge base retrieval instead of Stage 1 model
+    python src/infer_two_stage.py \
+        --use-rag \
+        --stage2-model models/stage2-rule-generation \
+        --instruction "Check that task bundles are pinned"
+
+    # RAG mode with custom KB directory
+    python src/infer_two_stage.py \
+        --use-rag --kb-dir data/knowledge_base \
+        --stage2-model models/stage2-rule-generation \
+        --instruction "Verify SBOM contains required packages"
 
     # Stage 1 only (get context)
     python src/infer_two_stage.py \
@@ -30,7 +42,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # Set environment before torch import
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -44,6 +56,179 @@ try:
     PEFT_AVAILABLE = True
 except ImportError:
     PEFT_AVAILABLE = False
+
+# Try to import RAG components
+try:
+    from knowledge_base import KnowledgeBase
+    from hybrid_retriever import HybridRetriever
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
+
+
+class RAGContextRetriever:
+    """Retrieve context from Knowledge Base using hybrid search."""
+    
+    def __init__(self, kb_dir: Path):
+        if not RAG_AVAILABLE:
+            raise RuntimeError(
+                "RAG components not available. "
+                "Install with: uv pip install sentence-transformers faiss-cpu rank-bm25"
+            )
+        
+        self.kb_dir = Path(kb_dir)
+        self.kb = None
+        self.retriever = None
+        self._loaded = False
+    
+    def load(self):
+        """Load KB and retriever indexes."""
+        if self._loaded:
+            return
+        
+        print(f"Loading Knowledge Base from {self.kb_dir}...")
+        self.kb = KnowledgeBase(self.kb_dir)
+        print(f"  Loaded {len(self.kb.helper_cards)} helpers, {len(self.kb.schemas)} schemas")
+        
+        print("Loading retriever indexes...")
+        self.retriever = HybridRetriever.from_kb_dir(self.kb_dir)
+        print("  ✓ Retriever ready")
+        
+        self._loaded = True
+    
+    def retrieve_context(
+        self,
+        query: str,
+        top_k_helpers: int = 5,
+        top_k_schemas: int = 3,
+    ) -> str:
+        """Retrieve context formatted for Stage 2.
+        
+        Returns context in same format as Stage 1 model output:
+        ATTESTATION_SCHEMA, AVAILABLE_HELPERS, RULE_DATA_KEYS, etc.
+        """
+        self.load()
+        
+        results = self.retriever.retrieve(
+            query=query,
+            helper_k=top_k_helpers,
+            schema_k=top_k_schemas,
+        )
+        
+        # Format as Stage 1-compatible context
+        return self._format_context(results, query)
+    
+    def _format_context(self, results, query: str) -> str:
+        """Format retrieval results as Stage 1-style context.
+        
+        Args:
+            results: RetrievalResult from HybridRetriever
+            query: Original query
+        """
+        parts = []
+        
+        # ATTESTATION_SCHEMA section (from retrieved schemas)
+        schema_results = results.schemas
+        if schema_results:
+            parts.append("ATTESTATION_SCHEMA:")
+            att_types = set()
+            for item in schema_results:
+                schema_id = item.get("schema_id") or item.get("id", "")
+                schema = self.kb.get_schema(schema_id)
+                if schema:
+                    parts.append(f"- {schema.canonical_path}")
+                    att_types.add(schema.attestation_type)
+            parts.append("")
+            
+            # Infer attestation type from schemas
+            if att_types:
+                att_type = list(att_types)[0]  # Primary type
+                if "slsa" in att_type.lower():
+                    parts.insert(1, "- Attestation type: SLSA Provenance")
+                elif "spdx" in att_type.lower():
+                    parts.insert(1, "- Attestation type: SPDX SBOM")
+                elif "cyclonedx" in att_type.lower():
+                    parts.insert(1, "- Attestation type: CycloneDX SBOM")
+        
+        # AVAILABLE_HELPERS section
+        helper_results = results.helpers
+        if helper_results:
+            parts.append("AVAILABLE_HELPERS:")
+            for item in helper_results:
+                helper_id = item.get("id", "")
+                helper = self.kb.get_helper_card(helper_id)
+                if helper:
+                    # Format: module.name(args) - description
+                    sig = helper.signature or helper.name
+                    desc = helper.description[:80] if helper.description else ""
+                    if desc:
+                        parts.append(f"- {sig} -- {desc}")
+                    else:
+                        parts.append(f"- {sig}")
+            parts.append("")
+        
+        # RULE_DATA_KEYS section (infer from query and helpers)
+        rule_data_keys = self._infer_rule_data_keys(query, helper_results)
+        if rule_data_keys:
+            parts.append("RULE_DATA_KEYS:")
+            for key in rule_data_keys:
+                parts.append(f"- {key}")
+            parts.append("")
+        
+        # SUGGESTED_PACKAGE and SUGGESTED_RULE_TYPE
+        package, rule_type = self._infer_package_and_type(query, schema_results)
+        parts.append(f"SUGGESTED_PACKAGE: {package}")
+        parts.append(f"SUGGESTED_RULE_TYPE: {rule_type}")
+        
+        return "\n".join(parts)
+    
+    def _infer_rule_data_keys(self, query: str, helper_results: List[Dict]) -> List[str]:
+        """Infer rule_data keys from query and helpers."""
+        keys = []
+        query_lower = query.lower()
+        
+        # Common rule_data patterns
+        if "allowed" in query_lower or "trusted" in query_lower:
+            keys.append("allowed_values")
+        if "bundle" in query_lower:
+            keys.append("allowed_bundles")
+        if "package" in query_lower or "sbom" in query_lower:
+            keys.append("required_packages")
+        if "task" in query_lower:
+            keys.append("allowed_tasks")
+        if "label" in query_lower:
+            keys.append("required_labels")
+        
+        return keys[:3]  # Limit to top 3
+    
+    def _infer_package_and_type(
+        self, 
+        query: str, 
+        schema_results: List[Dict]
+    ) -> Tuple[str, str]:
+        """Infer package name and rule type from query."""
+        query_lower = query.lower()
+        
+        # Default rule type
+        rule_type = "deny"
+        if "warn" in query_lower:
+            rule_type = "warn"
+        
+        # Infer package from query keywords
+        if "bundle" in query_lower:
+            package = "policy.release.attestation_task_bundle"
+        elif "sbom" in query_lower or "package" in query_lower:
+            package = "policy.release.sbom"
+        elif "task" in query_lower:
+            package = "policy.release.tasks"
+        elif "source" in query_lower:
+            package = "policy.release.source"
+        elif "image" in query_lower:
+            package = "policy.release.image"
+        else:
+            package = "policy.release.custom"
+        
+        return package, rule_type
 
 
 class TwoStageGenerator:
@@ -74,6 +259,7 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
         stage2_model_path: Optional[str] = None,
         base_model: str = "Qwen/Qwen3-4B-Instruct-2507",
         device: str = "auto",
+        rag_retriever: Optional[RAGContextRetriever] = None,
     ):
         self.device = self._detect_device(device)
         print(f"Using device: {self.device}")
@@ -82,6 +268,7 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
         self.stage1_tokenizer = None
         self.stage2_model = None
         self.stage2_tokenizer = None
+        self.rag_retriever = rag_retriever
         
         # Load Stage 1 model if path provided
         if stage1_model_path:
@@ -198,6 +385,27 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
         
         return response.strip()
     
+    def retrieve_context_rag(
+        self,
+        instruction: str,
+        top_k_helpers: int = 5,
+        top_k_schemas: int = 3,
+    ) -> str:
+        """
+        Retrieve context from Knowledge Base using RAG.
+        
+        Input: "Check that all pipeline tasks succeeded"
+        Output: ATTESTATION_SCHEMA + AVAILABLE_HELPERS + RULE_DATA_KEYS
+        """
+        if self.rag_retriever is None:
+            raise RuntimeError("RAG retriever not initialized. Provide --use-rag and --kb-dir.")
+        
+        return self.rag_retriever.retrieve_context(
+            query=instruction,
+            top_k_helpers=top_k_helpers,
+            top_k_schemas=top_k_schemas,
+        )
+    
     def infer_context(
         self, 
         instruction: str,
@@ -275,31 +483,46 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
         temperature: float = 0.1,
         verbose: bool = True,
         use_hints: bool = False,  # Disabled by default - not in training data
+        use_rag: bool = False,  # Use RAG retrieval instead of Stage 1 model
     ) -> dict:
         """
         Full two-stage pipeline.
         
         Args:
             instruction: Natural language instruction (what user types)
-            context: Optional pre-computed context. If None, Stage 1 runs first.
+            context: Optional pre-computed context. If None, Stage 1 or RAG runs first.
             max_tokens: Max tokens for generation
             temperature: Sampling temperature
             verbose: Print progress
+            use_rag: Use RAG retrieval instead of Stage 1 model
         
         Returns:
             dict with 'context' and 'output' keys
         """
         # Stage 1: Infer context if not provided
         if context is None:
-            if verbose:
-                print("\n=== Stage 1: Inferring Context ===")
-                print(f"Instruction: {instruction[:100]}...")
-            
-            context = self.infer_context(instruction, max_tokens=1024, temperature=temperature)
-            
-            if verbose:
-                print(f"\nInferred context ({len(context)} chars):")
-                print(context)  # Show full context
+            if use_rag and self.rag_retriever is not None:
+                # Use RAG retrieval
+                if verbose:
+                    print("\n=== Stage 1: Retrieving Context (RAG) ===")
+                    print(f"Query: {instruction[:100]}...")
+                
+                context = self.retrieve_context_rag(instruction)
+                
+                if verbose:
+                    print(f"\nRetrieved context ({len(context)} chars):")
+                    print(context)
+            else:
+                # Use Stage 1 model
+                if verbose:
+                    print("\n=== Stage 1: Inferring Context (Model) ===")
+                    print(f"Instruction: {instruction[:100]}...")
+                
+                context = self.infer_context(instruction, max_tokens=1024, temperature=temperature)
+                
+                if verbose:
+                    print(f"\nInferred context ({len(context)} chars):")
+                    print(context)  # Show full context
             
             # Validate context
             if not self._validate_context(context):
@@ -380,16 +603,27 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Full two-stage pipeline
+  # RAG mode (recommended): Use KB retrieval instead of Stage 1 model
+  python src/infer_two_stage.py \\
+      --use-rag \\
+      --stage2-model models/stage2-rule-generation \\
+      --instruction "Check that task bundles are pinned"
+
+  # RAG mode with more helpers
+  python src/infer_two_stage.py \\
+      --use-rag --top-k-helpers 8 --top-k-schemas 5 \\
+      --stage2-model models/stage2-rule-generation \\
+      --instruction "Verify SBOM contains required packages"
+
+  # Full two-stage pipeline (with Stage 1 model)
   python src/infer_two_stage.py \\
       --stage1-model models/stage1-context-inference \\
       --stage2-model models/stage2-rule-generation \\
       --instruction "Check that all pipeline tasks succeeded"
 
-  # Stage 1 only (get context)
+  # Stage 1 only with RAG (test retrieval)
   python src/infer_two_stage.py \\
-      --stage1-model models/stage1-context-inference \\
-      --stage 1 \\
+      --use-rag --stage 1 \\
       --instruction "Verify SBOM contains packages"
 
   # Stage 2 only (provide context)
@@ -399,9 +633,9 @@ Examples:
       --instruction "Check tasks" \\
       --context-file context.txt
 
-  # Interactive mode
+  # Interactive RAG mode
   python src/infer_two_stage.py \\
-      --stage1-model models/stage1-context-inference \\
+      --use-rag \\
       --stage2-model models/stage2-rule-generation \\
       --interactive
 """
@@ -478,21 +712,54 @@ Examples:
         action="store_true",
         help="Enable pattern reminder hints for Stage 2 (experimental, not in training data)",
     )
+    parser.add_argument(
+        "--use-rag",
+        action="store_true",
+        help="Use RAG retrieval instead of Stage 1 model for context",
+    )
+    parser.add_argument(
+        "--kb-dir",
+        type=str,
+        default="data/knowledge_base",
+        help="Knowledge base directory for RAG mode (default: data/knowledge_base)",
+    )
+    parser.add_argument(
+        "--top-k-helpers",
+        type=int,
+        default=5,
+        help="Number of helpers to retrieve in RAG mode (default: 5)",
+    )
+    parser.add_argument(
+        "--top-k-schemas",
+        type=int,
+        default=3,
+        help="Number of schemas to retrieve in RAG mode (default: 3)",
+    )
     
     args = parser.parse_args()
     
     # Validate arguments
-    if args.stage == 1 and not args.stage1_model:
-        parser.error("--stage1-model required for Stage 1")
+    if args.stage == 1 and not args.stage1_model and not args.use_rag:
+        parser.error("--stage1-model required for Stage 1 (or use --use-rag)")
     if args.stage == 2 and not args.stage2_model:
         parser.error("--stage2-model required for Stage 2")
-    if not args.stage and not args.stage1_model and not args.stage2_model:
-        parser.error("Provide at least one of --stage1-model or --stage2-model")
+    if not args.stage and not args.stage1_model and not args.stage2_model and not args.use_rag:
+        parser.error("Provide at least one of --stage1-model, --stage2-model, or --use-rag")
     
     # Load context from file if provided
     context = args.context
     if args.context_file:
         context = Path(args.context_file).read_text()
+    
+    # Initialize RAG retriever if requested
+    rag_retriever = None
+    if args.use_rag:
+        if not RAG_AVAILABLE:
+            parser.error(
+                "RAG components not available. "
+                "Install with: uv pip install sentence-transformers faiss-cpu rank-bm25"
+            )
+        rag_retriever = RAGContextRetriever(Path(args.kb_dir))
     
     # Initialize generator
     generator = TwoStageGenerator(
@@ -500,13 +767,15 @@ Examples:
         stage2_model_path=args.stage2_model,
         base_model=args.base_model,
         device=args.device,
+        rag_retriever=rag_retriever,
     )
     
     verbose = not args.quiet
     
     # Interactive mode
     if args.interactive:
-        print("\n=== Two-Stage Rego Generator ===")
+        mode = "RAG" if args.use_rag else "Model"
+        print(f"\n=== Two-Stage Rego Generator ({mode} mode) ===")
         print("Enter instructions (Ctrl+D to exit)\n")
         
         while True:
@@ -516,7 +785,10 @@ Examples:
                     continue
                 
                 if args.stage == 1:
-                    result = generator.infer_context(instruction)
+                    if args.use_rag:
+                        result = generator.retrieve_context_rag(instruction)
+                    else:
+                        result = generator.infer_context(instruction)
                     print(f"\n{result}\n")
                 elif args.stage == 2:
                     if not context:
@@ -527,7 +799,13 @@ Examples:
                     result = generator.generate_rule(requirements, context, use_pattern_reminder=args.use_hints)
                     print(f"\n{result}\n")
                 else:
-                    result = generator.generate(instruction, context=context, verbose=verbose, use_hints=args.use_hints)
+                    result = generator.generate(
+                        instruction, 
+                        context=context, 
+                        verbose=verbose, 
+                        use_hints=args.use_hints,
+                        use_rag=args.use_rag,
+                    )
                     print(f"\n=== Result ===\n{result['output']}\n")
                     
             except EOFError:
@@ -543,12 +821,15 @@ Examples:
         parser.error("Provide --instruction or use --interactive mode")
     
     if args.stage == 1:
-        # Stage 1 only
-        result = generator.infer_context(
-            args.instruction,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-        )
+        # Stage 1 only (context retrieval/inference)
+        if args.use_rag:
+            result = generator.retrieve_context_rag(args.instruction)
+        else:
+            result = generator.infer_context(
+                args.instruction,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+            )
         print(result)
         
     elif args.stage == 2:
@@ -577,6 +858,7 @@ Examples:
             temperature=args.temperature,
             verbose=verbose,
             use_hints=args.use_hints,
+            use_rag=args.use_rag,
         )
         
         if verbose:

@@ -8,11 +8,18 @@ dependencies = [
     "peft>=0.10.0",
     "torch>=2.1.0",
     "accelerate>=0.30.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "pyyaml>=6.0",
+]
+retrieval = [
+    "sentence-transformers>=2.2.0",
+    "faiss-cpu>=1.7.0",
+    "rank-bm25>=0.2.0",
 ]
 
 [tool.hatch.build.targets.wheel]
