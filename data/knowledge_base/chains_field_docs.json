@@ -1,0 +1,575 @@
+[
+  {
+    "json_path": "$._type",
+    "go_type": "string",
+    "description": "In-toto statement type URI. Always 'https://in-toto.io/Statement/v0.1' for SLSA v0.2",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "https://in-toto.io/Statement/v0.1"
+    ],
+    "keywords": [
+      "statement type",
+      "in-toto",
+      "attestation format"
+    ]
+  },
+  {
+    "json_path": "$.predicateType",
+    "go_type": "string",
+    "description": "SLSA provenance predicate type URI. 'https://slsa.dev/provenance/v0.2' for SLSA v0.2",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "https://slsa.dev/provenance/v0.2"
+    ],
+    "keywords": [
+      "predicate type",
+      "slsa version",
+      "provenance format"
+    ]
+  },
+  {
+    "json_path": "$.subject[*].name",
+    "go_type": "string",
+    "description": "OCI image reference (URI) of the built artifact. Format: registry/repository:tag or registry/repository@sha256:digest",
+    "source_file": "vendor/github.com/in-toto/in-toto-golang/in_toto/attestations.go",
+    "example_values": [
+      "quay.io/org/image@sha256:abc123...",
+      "gcr.io/project/app:v1.0"
+    ],
+    "keywords": [
+      "image",
+      "artifact",
+      "subject",
+      "OCI",
+      "container",
+      "built image",
+      "output"
+    ]
+  },
+  {
+    "json_path": "$.subject[*].digest",
+    "go_type": "map[string]string",
+    "description": "Cryptographic digest(s) of the built artifact. Key is algorithm (e.g., 'sha256'), value is hex-encoded digest",
+    "source_file": "vendor/github.com/in-toto/in-toto-golang/in_toto/attestations.go",
+    "example_values": [
+      "{\"sha256\": \"abc123...\"}"
+    ],
+    "keywords": [
+      "digest",
+      "sha256",
+      "hash",
+      "checksum",
+      "verification",
+      "integrity"
+    ]
+  },
+  {
+    "json_path": "$.subject[*].digest.sha256",
+    "go_type": "string",
+    "description": "SHA256 digest of the built artifact (hex-encoded, 64 chars). Used to verify artifact integrity",
+    "source_file": "vendor/github.com/in-toto/in-toto-golang/in_toto/attestations.go",
+    "example_values": [
+      "abc123def456..."
+    ],
+    "keywords": [
+      "sha256",
+      "digest",
+      "hash",
+      "artifact integrity",
+      "verification",
+      "image digest"
+    ]
+  },
+  {
+    "json_path": "$.predicate.builder.id",
+    "go_type": "string",
+    "description": "URI identifying the build system/platform that created the attestation (e.g., Tekton Chains)",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "https://tekton.dev/chains/v2"
+    ],
+    "keywords": [
+      "builder",
+      "build system",
+      "tekton",
+      "chains",
+      "provenance"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildType",
+    "go_type": "string",
+    "description": "URI identifying the type of build (e.g., tekton.dev/v1beta1/PipelineRun or tekton.dev/v1beta1/TaskRun)",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "tekton.dev/v1beta1/PipelineRun",
+      "tekton.dev/v1beta1/TaskRun"
+    ],
+    "keywords": [
+      "build type",
+      "pipeline",
+      "taskrun",
+      "tekton"
+    ]
+  },
+  {
+    "json_path": "$.predicate.materials[*].uri",
+    "go_type": "string",
+    "description": "URI of a material (input) that influenced the build. Includes: git repos, step/sidecar container images, task bundle references",
+    "source_file": "pkg/chains/formats/slsa/internal/material/material.go",
+    "example_values": [
+      "git+https://github.com/org/repo.git",
+      "oci://quay.io/image@sha256:...",
+      "oci://registry.redhat.io/task@sha256:..."
+    ],
+    "keywords": [
+      "material",
+      "input",
+      "source",
+      "git",
+      "image",
+      "dependency",
+      "base image"
+    ]
+  },
+  {
+    "json_path": "$.predicate.materials[*].digest",
+    "go_type": "map[string]string",
+    "description": "Cryptographic digest of the material. For git: sha1 commit. For images: sha256 digest",
+    "source_file": "pkg/chains/formats/slsa/internal/material/material.go",
+    "example_values": [
+      "{\"sha1\": \"abc123...\"}",
+      "{\"sha256\": \"def456...\"}"
+    ],
+    "keywords": [
+      "digest",
+      "sha256",
+      "sha1",
+      "commit",
+      "pinned",
+      "verification"
+    ]
+  },
+  {
+    "json_path": "$.predicate.materials[*].digest.sha256",
+    "go_type": "string",
+    "description": "SHA256 digest of a material/input artifact (container image, OCI bundle). Used to verify input integrity",
+    "source_file": "pkg/chains/formats/slsa/internal/material/material.go",
+    "example_values": [
+      "abc123def456..."
+    ],
+    "keywords": [
+      "sha256",
+      "digest",
+      "material",
+      "input",
+      "pinned",
+      "image digest",
+      "bundle digest"
+    ]
+  },
+  {
+    "json_path": "$.predicate.materials[*].digest.sha1",
+    "go_type": "string",
+    "description": "SHA1 digest, typically a git commit hash for source code materials",
+    "source_file": "pkg/chains/formats/slsa/internal/material/material.go",
+    "example_values": [
+      "abc123def456..."
+    ],
+    "keywords": [
+      "sha1",
+      "git commit",
+      "commit hash",
+      "source",
+      "revision"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].name",
+    "go_type": "string",
+    "description": "Name of the task within the pipeline (the PipelineTask name, not the Task definition name)",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "build-image",
+      "git-clone",
+      "push-image",
+      "verify-signature"
+    ],
+    "keywords": [
+      "task name",
+      "pipeline task",
+      "step",
+      "stage"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].after",
+    "go_type": "[]string",
+    "description": "List of task names that must complete before this task runs (runAfter dependencies)",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "[\"git-clone\"]",
+      "[\"build-image\", \"test\"]"
+    ],
+    "keywords": [
+      "after",
+      "dependency",
+      "order",
+      "sequence",
+      "runAfter"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].status",
+    "go_type": "string",
+    "description": "Execution status of the task: 'Succeeded', 'Failed', or 'Running'",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "Succeeded",
+      "Failed"
+    ],
+    "keywords": [
+      "status",
+      "success",
+      "failure",
+      "execution",
+      "result"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].startedOn",
+    "go_type": "time.Time",
+    "description": "UTC timestamp when the task started execution",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "2024-01-15T10:30:00Z"
+    ],
+    "keywords": [
+      "start time",
+      "timestamp",
+      "execution",
+      "timing"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].finishedOn",
+    "go_type": "time.Time",
+    "description": "UTC timestamp when the task completed execution",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "2024-01-15T10:35:00Z"
+    ],
+    "keywords": [
+      "finish time",
+      "end time",
+      "timestamp",
+      "execution",
+      "timing",
+      "duration"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].serviceAccountName",
+    "go_type": "string",
+    "description": "Kubernetes ServiceAccount used to run the task (from PipelineRun.Spec.TaskRunTemplate)",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "pipeline",
+      "build-bot",
+      "default"
+    ],
+    "keywords": [
+      "service account",
+      "identity",
+      "rbac",
+      "kubernetes",
+      "permissions"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].ref.name",
+    "go_type": "string",
+    "description": "Name of the referenced Task resource (only for cluster/namespace-scoped Tasks, not remote resolvers)",
+    "source_file": "vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/taskref_types.go",
+    "example_values": [
+      "buildah",
+      "git-clone"
+    ],
+    "keywords": [
+      "task ref",
+      "task name",
+      "cluster task"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].ref.kind",
+    "go_type": "string",
+    "description": "Kind of the referenced task: 'Task' (namespaced) or custom task kind",
+    "source_file": "vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/taskref_types.go",
+    "example_values": [
+      "Task"
+    ],
+    "keywords": [
+      "kind",
+      "task kind",
+      "namespaced"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].ref.resolver",
+    "go_type": "string",
+    "description": "Name of the resolver to fetch remote tasks: 'bundles' for OCI bundles, 'git' for git repos, 'hub' for Tekton Hub",
+    "source_file": "vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/resolver_types.go",
+    "example_values": [
+      "bundles",
+      "git",
+      "hub"
+    ],
+    "keywords": [
+      "resolver",
+      "bundle",
+      "git",
+      "remote task",
+      "OCI",
+      "tekton hub"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].ref.params[*].name",
+    "go_type": "string",
+    "description": "Parameter name for the resolver. For 'bundles': 'bundle' (OCI ref) and 'name' (task name). For 'git': 'url', 'revision', 'pathInRepo'",
+    "source_file": "vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/resolver_types.go",
+    "example_values": [
+      "bundle",
+      "name",
+      "url",
+      "revision",
+      "pathInRepo"
+    ],
+    "keywords": [
+      "param name",
+      "resolver param",
+      "bundle",
+      "name",
+      "url",
+      "git"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].ref.params[*].value",
+    "go_type": "string|[]string|map[string]string",
+    "description": "Parameter value for the resolver. When param.name='bundle': OCI bundle reference (e.g., quay.io/org/task@sha256:...). When param.name='name': task name within the bundle",
+    "source_file": "vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/param_types.go",
+    "example_values": [
+      "quay.io/konflux-ci/buildah-oci-ta@sha256:abc123...",
+      "buildah-oci-ta",
+      "https://github.com/tektoncd/catalog.git",
+      "main"
+    ],
+    "keywords": [
+      "bundle reference",
+      "OCI reference",
+      "digest",
+      "pinned",
+      "task bundle",
+      "git url",
+      "revision"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].results[*].name",
+    "go_type": "string",
+    "description": "Name of a result produced by the task. Common results: IMAGE_URL, IMAGE_DIGEST, CHAINS-GIT_URL, CHAINS-GIT_COMMIT, SBOM_BLOB_URL",
+    "source_file": "vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/result_types.go",
+    "example_values": [
+      "IMAGE_URL",
+      "IMAGE_DIGEST",
+      "CHAINS-GIT_URL",
+      "CHAINS-GIT_COMMIT",
+      "SBOM_BLOB_URL"
+    ],
+    "keywords": [
+      "result name",
+      "output",
+      "image url",
+      "image digest",
+      "git commit",
+      "sbom"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].results[*].type",
+    "go_type": "string",
+    "description": "Type of the result value: 'string', 'array', or 'object'",
+    "source_file": "vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/result_types.go",
+    "example_values": [
+      "string",
+      "array",
+      "object"
+    ],
+    "keywords": [
+      "result type",
+      "string",
+      "array",
+      "object"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].results[*].value",
+    "go_type": "string|[]string|map[string]string",
+    "description": "Value of the result. For IMAGE_URL: full image reference. For IMAGE_DIGEST: sha256:... digest. For CHAINS-GIT_COMMIT: git commit SHA. For REPORTS: mapping of image digests to CVE scan report digests",
+    "source_file": "vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/result_types.go",
+    "example_values": [
+      "quay.io/org/app:tag",
+      "sha256:abc123...",
+      "abc123def456...",
+      "{\"sha256:image_digest\": \"sha256:report_digest\"}"
+    ],
+    "keywords": [
+      "result value",
+      "image url",
+      "digest",
+      "commit sha",
+      "output value",
+      "CVE",
+      "vulnerability",
+      "clair",
+      "REPORTS",
+      "scan"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].steps[*].entryPoint",
+    "go_type": "string",
+    "description": "The command or script executed by the step. Either the joined command array or the script content",
+    "source_file": "pkg/chains/formats/slsa/attest/attest.go",
+    "example_values": [
+      "#!/bin/bash\nbuildah push...",
+      "/ko-app/git-init"
+    ],
+    "keywords": [
+      "entrypoint",
+      "command",
+      "script",
+      "execution"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].steps[*].arguments",
+    "go_type": "[]string",
+    "description": "Arguments passed to the step command (step.Args from the Task definition)",
+    "source_file": "pkg/chains/formats/slsa/attest/attest.go",
+    "example_values": [
+      "[\"--format\", \"oci\"]"
+    ],
+    "keywords": [
+      "arguments",
+      "args",
+      "parameters",
+      "command args"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].steps[*].environment.image",
+    "go_type": "string",
+    "description": "Full OCI reference of the container image used for this step (with digest from stepState.ImageID)",
+    "source_file": "pkg/chains/formats/slsa/attest/attest.go",
+    "example_values": [
+      "oci://quay.io/buildah/buildah@sha256:abc..."
+    ],
+    "keywords": [
+      "step image",
+      "container image",
+      "execution environment",
+      "base image"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].steps[*].environment.container",
+    "go_type": "string",
+    "description": "Name of the container/step within the pod",
+    "source_file": "pkg/chains/formats/slsa/attest/attest.go",
+    "example_values": [
+      "build",
+      "push",
+      "clone"
+    ],
+    "keywords": [
+      "container name",
+      "step name"
+    ]
+  },
+  {
+    "json_path": "$.predicate.buildConfig.tasks[*].invocation.parameters",
+    "go_type": "map[string]interface{}",
+    "description": "Input parameters passed to the task, filtered to only include non-sensitive params defined in the task spec",
+    "source_file": "pkg/chains/formats/slsa/attest/attest.go",
+    "example_values": [
+      "{\"IMAGE\": \"quay.io/org/app\", \"DOCKERFILE\": \"./Dockerfile\"}"
+    ],
+    "keywords": [
+      "parameters",
+      "inputs",
+      "task params",
+      "build inputs"
+    ]
+  },
+  {
+    "json_path": "$.predicate.invocation.parameters",
+    "go_type": "map[string]interface{}",
+    "description": "Input parameters passed to the pipeline, filtered to only include non-sensitive params defined in the pipeline spec",
+    "source_file": "pkg/chains/formats/slsa/attest/attest.go",
+    "example_values": [
+      "{\"git-url\": \"https://github.com/...\", \"output-image\": \"quay.io/...\"}"
+    ],
+    "keywords": [
+      "pipeline parameters",
+      "inputs",
+      "build inputs"
+    ]
+  },
+  {
+    "json_path": "$.predicate.metadata.buildStartedOn",
+    "go_type": "*time.Time",
+    "description": "UTC timestamp when the pipeline/task run started",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "2024-01-15T10:00:00Z"
+    ],
+    "keywords": [
+      "build start",
+      "timestamp",
+      "timing"
+    ]
+  },
+  {
+    "json_path": "$.predicate.metadata.buildFinishedOn",
+    "go_type": "*time.Time",
+    "description": "UTC timestamp when the pipeline/task run completed",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "2024-01-15T10:45:00Z"
+    ],
+    "keywords": [
+      "build finish",
+      "timestamp",
+      "timing",
+      "duration"
+    ]
+  },
+  {
+    "json_path": "$.predicate.metadata.reproducible",
+    "go_type": "bool",
+    "description": "Whether the build is reproducible (set via chains.tekton.dev/reproducible annotation)",
+    "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
+    "example_values": [
+      "true",
+      "false"
+    ],
+    "keywords": [
+      "reproducible",
+      "deterministic",
+      "hermetic"
+    ]
+  }
+]

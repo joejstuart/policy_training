@@ -24,7 +24,7 @@ import sys
 import urllib.request
 import urllib.error
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -77,7 +77,7 @@ class OllamaClient:
                 headers={"Content-Type": "application/json"},
                 method="POST"
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=180) as resp:  # 3 minutes for large models
                 result = json.loads(resp.read().decode('utf-8'))
                 return result.get("response", "")
         except Exception as e:
@@ -146,7 +146,95 @@ def build_helper_context(helper: HelperFull, miner: UsageMiner) -> str:
     return "\n".join(parts)
 
 
-def build_schema_context(schema: SchemaField, miner: UsageMiner) -> str:
+def gather_example_values(schema: SchemaField, attestation_dir: Path) -> List[str]:
+    """Gather diverse example values for a schema field from attestations."""
+    if not attestation_dir or not attestation_dir.exists():
+        return []
+    
+    examples = set()
+    path = schema.canonical_path
+    
+    # Convert JSONPath to key sequence
+    # $.predicate.buildConfig.tasks[*].ref.params[*].value
+    # -> ['predicate', 'buildConfig', 'tasks', '*', 'ref', 'params', '*', 'value']
+    keys = path.replace('$', '').replace('[*]', '.[*]').split('.')
+    keys = [k for k in keys if k]
+    
+    for att_file in list(attestation_dir.glob("*.json"))[:10]:  # Sample 10 files
+        try:
+            with open(att_file) as f:
+                data = json.load(f)
+            
+            values = extract_values_at_path(data, keys)
+            for v in values:
+                if isinstance(v, str) and len(v) < 200:
+                    examples.add(v)
+                    if len(examples) >= 10:
+                        break
+        except:
+            pass
+        
+        if len(examples) >= 10:
+            break
+    
+    return list(examples)
+
+
+def extract_values_at_path(data: Any, keys: List[str]) -> List[Any]:
+    """Extract all values at a given path (handling [*] wildcards)."""
+    if not keys:
+        return [data] if data is not None else []
+    
+    key = keys[0]
+    remaining = keys[1:]
+    
+    if key == '[*]':
+        # Iterate over array
+        if isinstance(data, list):
+            results = []
+            for item in data:
+                results.extend(extract_values_at_path(item, remaining))
+            return results
+        return []
+    else:
+        # Access dict key
+        if isinstance(data, dict) and key in data:
+            return extract_values_at_path(data[key], remaining)
+        return []
+
+
+def gather_param_examples(attestation_dir: Path) -> List[Tuple[str, str]]:
+    """Gather param name/value pairs to show what params contain."""
+    if not attestation_dir or not attestation_dir.exists():
+        return []
+    
+    examples = []
+    seen_names = set()
+    
+    for att_file in list(attestation_dir.glob("*.json"))[:5]:
+        try:
+            with open(att_file) as f:
+                data = json.load(f)
+            
+            # Navigate to tasks
+            tasks = data.get('predicate', {}).get('buildConfig', {}).get('tasks', [])
+            for task in tasks:
+                params = task.get('ref', {}).get('params', [])
+                for param in params:
+                    name = param.get('name', '')
+                    value = param.get('value', '')
+                    if name and name not in seen_names and isinstance(value, str):
+                        seen_names.add(name)
+                        examples.append((name, value))
+                        if len(examples) >= 10:
+                            return examples
+        except:
+            pass
+    
+    return examples
+
+
+def build_schema_context(schema: SchemaField, miner: UsageMiner, attestation_dir: Path = None) -> str:
     """Build rich context for a schema field."""
     
     # Extract key field name from path
@@ -165,13 +253,29 @@ def build_schema_context(schema: SchemaField, miner: UsageMiner) -> str:
     parts.append(f"Attestation: {schema.attestation_type}")
     parts.append("")
     
-    # Example value
-    if schema.example_value is not None:
+    # Gather multiple example values from attestations
+    example_values = gather_example_values(schema, attestation_dir)
+    if example_values:
+        parts.append("EXAMPLE VALUES FROM ATTESTATIONS:")
+        for ex in example_values[:5]:  # Show up to 5 examples
+            parts.append(f"  - {ex}")
+        parts.append("")
+    elif schema.example_value is not None:
         example_str = json.dumps(schema.example_value) if not isinstance(schema.example_value, str) else schema.example_value
         if len(example_str) > 200:
             example_str = example_str[:197] + "..."
         parts.append(f"EXAMPLE VALUE: {example_str}")
         parts.append("")
+    
+    # For params, show name/value pairs
+    if "params" in schema.canonical_path.lower():
+        param_examples = gather_param_examples(attestation_dir)
+        if param_examples:
+            parts.append("PARAM NAME/VALUE PAIRS (what this field contains):")
+            for name, value in param_examples[:5]:
+                val_str = value[:60] + "..." if len(value) > 60 else value
+                parts.append(f"  - {name}: {val_str}")
+            parts.append("")
     
     # Usage in rules
     if usages:
@@ -223,16 +327,21 @@ You are analyzing a schema field from attestation data used in Rego policies.
 
 {context}
 
-Based ONLY on the path, example value, and rule usage above, respond in this exact JSON format:
+Based ONLY on the path, example values, and param pairs above, respond in this exact JSON format:
 
 {{
-  "description": "One sentence describing what this field contains",
-  "use_when": ["check scenario 1", "check scenario 2"],
-  "common_checks": "What conditions are typically checked on this field"
+  "description": "One sentence describing what this field contains - INCLUDE specific value types seen in examples (e.g., bundle references, digests, task names)",
+  "use_when": ["specific policy check 1", "specific policy check 2", "specific policy check 3"],
+  "keywords": ["keyword1", "keyword2", "keyword3"]
 }}
 
 RULES:
 - Base your answer ONLY on the provided information
+- Look at EXAMPLE VALUES and PARAM PAIRS to understand what this field actually contains
+- If you see values like "quay.io/...@sha256:..." mention "bundle reference" and "digest" and "pinned"
+- If you see task names, mention "task name"
+- The use_when should be SPECIFIC policy checks like "verify bundle is pinned", "check task reference contains digest"
+- Keywords should include terms that someone searching for this field would use
 - Keep description under 100 characters
 - Include 2-3 specific use_when scenarios
 - Describe common_checks based on the rule examples
@@ -318,10 +427,10 @@ def enrich_helper(helper: HelperFull, miner: UsageMiner, llm: OllamaClient, dry_
     return helper
 
 
-def enrich_schema(schema: SchemaField, miner: UsageMiner, llm: OllamaClient, dry_run: bool = False) -> SchemaField:
+def enrich_schema(schema: SchemaField, miner: UsageMiner, llm: OllamaClient, attestation_dir: Path = None, dry_run: bool = False) -> SchemaField:
     """Enrich a single schema with LLM-generated metadata."""
     
-    context = build_schema_context(schema, miner)
+    context = build_schema_context(schema, miner, attestation_dir)
     
     if dry_run:
         print(f"\n{'='*60}")
@@ -341,10 +450,19 @@ def enrich_schema(schema: SchemaField, miner: UsageMiner, llm: OllamaClient, dry
     if parsed:
         if "description" in parsed:
             schema.description = parsed["description"]
-        if "use_when" in parsed and isinstance(parsed["use_when"], list):
-            schema.use_when = parsed["use_when"]
+        
+        # Combine use_when and keywords for better retrieval
+        use_when = parsed.get("use_when", []) if isinstance(parsed.get("use_when"), list) else []
+        keywords = parsed.get("keywords", []) if isinstance(parsed.get("keywords"), list) else []
+        
+        # Add keywords as use_when entries for retrieval
+        combined = use_when + [f"keyword: {kw}" for kw in keywords]
+        if combined:
+            schema.use_when = combined
         
         print(f"  ✓ Enriched: {parsed.get('description', '')[:50]}...")
+        if keywords:
+            print(f"    Keywords: {', '.join(keywords[:5])}")
     else:
         print(f"  ✗ Could not parse response")
     
@@ -365,6 +483,7 @@ def main():
     
     repo_root = find_repo_root()
     kb_dir = args.kb_dir or (repo_root / "data" / "knowledge_base")
+    attestation_dir = repo_root / "data" / "attestations"
     
     print(f"Loading KB from: {kb_dir}")
     kb = KnowledgeBase(kb_dir)
@@ -422,7 +541,7 @@ def main():
         
         for i, schema in enumerate(schemas_to_enrich, 1):
             print(f"\n[{i}/{len(schemas_to_enrich)}] {schema.schema_id}")
-            enriched = enrich_schema(schema, miner, llm, args.dry_run)
+            enriched = enrich_schema(schema, miner, llm, attestation_dir, args.dry_run)
             kb.schemas[schema.schema_id] = enriched
     
     # Save enriched KB

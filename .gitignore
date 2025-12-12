@@ -44,3 +44,5 @@ data/attestations/quay.io_*.json
 
 # uv lock (regenerated)
 # uv.lock
+
+tektoncd-chains

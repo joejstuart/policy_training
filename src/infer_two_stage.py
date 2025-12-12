@@ -262,18 +262,9 @@ class RAGContextRetriever:
                     att_types.add(schema.attestation_type)
             parts.append("")
             
-            # Add attestation access pattern hint based on type
+            # Note attestation type from schemas
             if att_types:
-                att_type = list(att_types)[0]  # Primary type
-                if "slsa" in att_type.lower():
-                    parts.insert(1, "- Attestation type: SLSA Provenance")
-                    parts.insert(2, "- Access pattern: some att in lib.pipelinerun_attestations; then att.predicate...")
-                elif "spdx" in att_type.lower():
-                    parts.insert(1, "- Attestation type: SPDX SBOM")
-                    parts.insert(2, "- Access pattern: some sbom in sbom.spdx_sboms; then sbom.packages...")
-                elif "cyclonedx" in att_type.lower():
-                    parts.insert(1, "- Attestation type: CycloneDX SBOM")
-                    parts.insert(2, "- Access pattern: some sbom in sbom.cyclonedx_sboms; then sbom.components...")
+                parts.insert(1, f"- Attestation type: {', '.join(att_types)}")
         
         # AVAILABLE_HELPERS section
         helper_results = results.helpers
@@ -329,7 +320,7 @@ class RAGContextRetriever:
             parts.append("")
         
         # SUGGESTED_PACKAGE and SUGGESTED_RULE_TYPE
-        package, rule_type = self._infer_package_and_type(query, schema_results)
+        package, rule_type = self._infer_package_and_type(query, helper_results)
         parts.append(f"SUGGESTED_PACKAGE: {package}")
         parts.append(f"SUGGESTED_RULE_TYPE: {rule_type}")
         
@@ -405,50 +396,55 @@ class RAGContextRetriever:
         return f".{converted_path}"
     
     def _infer_rule_data_keys(self, query: str, helper_results: List[Dict]) -> List[str]:
-        """Infer rule_data keys from query and helpers."""
-        keys = []
-        query_lower = query.lower()
+        """Infer rule_data keys from retrieved helpers.
         
-        # Common rule_data patterns
-        if "allowed" in query_lower or "trusted" in query_lower:
-            keys.append("allowed_values")
-        if "bundle" in query_lower:
-            keys.append("allowed_bundles")
-        if "package" in query_lower or "sbom" in query_lower:
-            keys.append("required_packages")
-        if "task" in query_lower:
-            keys.append("allowed_tasks")
-        if "label" in query_lower:
-            keys.append("required_labels")
+        Extracts rule_data keys mentioned in helper descriptions/use_when.
+        """
+        keys = set()
         
-        return keys[:3]  # Limit to top 3
+        # Extract from helper metadata
+        for item in helper_results:
+            # Check description for rule_data mentions
+            desc = item.get("description", "").lower()
+            use_when = item.get("use_when", [])
+            combined = desc + " ".join(use_when).lower()
+            
+            # Look for rule_data key patterns
+            if "allowed_" in combined or "restrict_" in combined or "warn_" in combined:
+                # Extract potential key names
+                import re
+                matches = re.findall(r'(allowed_\w+|restrict_\w+|warn_\w+|required_\w+)', combined)
+                keys.update(matches)
+        
+        return list(keys)[:5]
     
     def _infer_package_and_type(
         self, 
         query: str, 
-        schema_results: List[Dict]
+        helper_results: List[Dict]
     ) -> Tuple[str, str]:
-        """Infer package name and rule type from query."""
+        """Infer package name and rule type from query and retrieved helpers."""
         query_lower = query.lower()
         
-        # Default rule type
+        # Detect rule type from query intent
         rule_type = "deny"
         if "warn" in query_lower:
             rule_type = "warn"
         
-        # Infer package from query keywords
-        if "bundle" in query_lower:
-            package = "policy.release.attestation_task_bundle"
-        elif "sbom" in query_lower or "package" in query_lower:
-            package = "policy.release.sbom"
-        elif "task" in query_lower:
-            package = "policy.release.tasks"
-        elif "source" in query_lower:
-            package = "policy.release.source"
-        elif "image" in query_lower:
-            package = "policy.release.image"
+        # Infer package from retrieved helper modules
+        modules = set()
+        for item in helper_results:
+            helper_id = item.get("id", "")
+            prefix = self._get_module_prefix(helper_id)
+            if prefix and prefix != "lib":
+                modules.add(prefix)
+        
+        # Use most common module as package hint
+        if modules:
+            primary_module = list(modules)[0]
+            package = f"policy.release.{primary_module}"
         else:
-            package = "policy.release.custom"
+            package = "policy.release"
         
         return package, rule_type
 
