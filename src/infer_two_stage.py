@@ -99,24 +99,79 @@ class RAGContextRetriever:
     def retrieve_context(
         self,
         query: str,
-        top_k_helpers: int = 5,
+        top_k_helpers: int = 7,
         top_k_schemas: int = 3,
     ) -> str:
         """Retrieve context formatted for Stage 2.
         
-        Returns context in same format as Stage 1 model output:
-        ATTESTATION_SCHEMA, AVAILABLE_HELPERS, RULE_DATA_KEYS, etc.
+        Uses multi-faceted retrieval:
+        1. Domain helpers (task/sbom/image specific)
+        2. Boilerplate helpers (result_helper, rule_data, attestations)
         """
         self.load()
         
-        results = self.retriever.retrieve(
-            query=query,
-            helper_k=top_k_helpers,
-            schema_k=top_k_schemas,
-        )
+        # Multi-faceted retrieval
+        results = self._multi_facet_retrieve(query, top_k_helpers, top_k_schemas)
         
         # Format as Stage 1-compatible context
         return self._format_context(results, query)
+    
+    def _multi_facet_retrieve(self, query: str, helper_k: int, schema_k: int):
+        """Retrieve helpers using multiple query facets.
+        
+        Splits retrieval into domain-specific and boilerplate queries
+        to ensure we get both specialized and common helpers.
+        """
+        from hybrid_retriever import RetrievalResult
+        
+        query_lower = query.lower()
+        
+        # Facet 1: Domain-specific helpers (main query)
+        domain_results = self.retriever.retrieve(
+            query=query,
+            helper_k=helper_k - 2,  # Reserve space for boilerplate
+            schema_k=schema_k,
+        )
+        
+        # Facet 2: Boilerplate helpers for deny rules
+        boilerplate_query = "deny rule result helper create violation output metadata"
+        boilerplate_results = self.retriever.retrieve(
+            query=boilerplate_query,
+            helper_k=3,
+            schema_k=0,
+        )
+        
+        # Facet 3: Data access helpers (attestations, rule_data)
+        access_query = "attestations pipelinerun rule_data configuration access"
+        access_results = self.retriever.retrieve(
+            query=access_query,
+            helper_k=2,
+            schema_k=0,
+        )
+        
+        # Merge and dedupe helpers
+        seen_ids = set()
+        merged_helpers = []
+        
+        for h in domain_results.helpers:
+            hid = h.get("id", "")
+            if hid not in seen_ids:
+                seen_ids.add(hid)
+                merged_helpers.append(h)
+        
+        for h in boilerplate_results.helpers + access_results.helpers:
+            hid = h.get("id", "")
+            if hid not in seen_ids:
+                seen_ids.add(hid)
+                merged_helpers.append(h)
+        
+        # Cap to requested size
+        merged_helpers = merged_helpers[:helper_k]
+        
+        return RetrievalResult(
+            helpers=merged_helpers,
+            schemas=domain_results.schemas,
+        )
     
     def _format_context(self, results, query: str) -> str:
         """Format retrieval results as Stage 1-style context.
@@ -158,26 +213,46 @@ class RAGContextRetriever:
         # AVAILABLE_HELPERS section
         helper_results = results.helpers
         if helper_results:
-            parts.append("AVAILABLE_HELPERS:")
+            # Derive imports from retrieved helpers
+            imports_needed = set()
             
-            # Check if this is task-related and add common pattern
-            helper_names = [item.get("id", "") for item in helper_results]
-            if any("task" in h.lower() for h in helper_names):
-                parts.append("# Common pattern for tasks: some task in tekton.tasks(att)")
-            if any("sbom" in h.lower() or "package" in h.lower() for h in helper_names):
-                parts.append("# Common pattern for SBOMs: some pkg in sbom.packages")
+            for item in helper_results:
+                helper_id = item.get("id", "")
+                module_prefix = self._get_module_prefix(helper_id)
+                
+                # Build import from module prefix
+                if module_prefix == "lib":
+                    imports_needed.add("import data.lib")
+                elif module_prefix:
+                    imports_needed.add(f"import data.lib.{module_prefix}")
+            
+            if imports_needed:
+                parts.append("REQUIRED_IMPORTS:")
+                for imp in sorted(imports_needed):
+                    parts.append(f"- {imp}")
+                parts.append("")
+            
+            parts.append("AVAILABLE_HELPERS:")
             
             for item in helper_results:
                 helper_id = item.get("id", "")
                 helper = self.kb.get_helper_card(helper_id)
                 if helper:
-                    # Format: module.name(args) - description
-                    sig = helper.signature or helper.name
-                    desc = helper.description[:80] if helper.description else ""
-                    if desc:
-                        parts.append(f"- {sig} -- {desc}")
+                    # Extract module prefix from helper_id
+                    module_prefix = self._get_module_prefix(helper_id)
+                    
+                    # Format: module.name(args) -- description
+                    base_sig = helper.signature or helper.name
+                    if module_prefix and not base_sig.startswith(module_prefix):
+                        full_sig = f"{module_prefix}.{base_sig}"
                     else:
-                        parts.append(f"- {sig}")
+                        full_sig = base_sig
+                    
+                    desc = helper.description[:70] if helper.description else ""
+                    if desc:
+                        parts.append(f"- {full_sig} -- {desc}")
+                    else:
+                        parts.append(f"- {full_sig}")
             parts.append("")
         
         # RULE_DATA_KEYS section (infer from query and helpers)
@@ -194,6 +269,27 @@ class RAGContextRetriever:
         parts.append(f"SUGGESTED_RULE_TYPE: {rule_type}")
         
         return "\n".join(parts)
+    
+    def _get_module_prefix(self, helper_id: str) -> str:
+        """Extract module prefix from helper ID.
+        
+        Examples:
+            "lib.tekton.bundle" -> "tekton"
+            "lib.sbom.spdx_sboms" -> "sbom"
+            "lib.result_helper" -> "lib"
+            "lib.image.parse" -> "image"
+        """
+        parts = helper_id.split('.')
+        
+        # Pattern: lib.module.function or lib.function
+        if len(parts) >= 3 and parts[0] == "lib":
+            # lib.tekton.bundle -> tekton
+            return parts[1]
+        elif len(parts) == 2 and parts[0] == "lib":
+            # lib.result_helper -> lib
+            return "lib"
+        
+        return ""
     
     def _jsonpath_to_rego_hint(self, jsonpath: str) -> str:
         """Convert JSONPath notation to Rego-friendly path description.
