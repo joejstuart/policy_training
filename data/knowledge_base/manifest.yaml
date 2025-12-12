@@ -1,8 +1,8 @@
 version: '1.0'
-git_ref: b179f7f99805
-built_at: '2025-12-12T06:08:54.964947+00:00'
+git_ref: 1ac84b2a6667
+built_at: '2025-12-12T14:20:36.212683+00:00'
 policy_lib_hash: af16962df1844fbc
-helper_count: 98
+helper_count: 122
 schema_count: 19
 attestation_types:
 - slsa_provenance_v02

@@ -49,9 +49,13 @@ def find_repo_root() -> Path:
 
 
 def extract_helpers(repo_root: Path) -> List[HelperFull]:
-    """Extract all helpers from policy/lib using AST parser.
+    """Extract all helpers from policy/lib and policy/release/lib using AST parser.
     
     Per architecture spec: Extract helpers with AST parser (not regex).
+    
+    Scans:
+    - policy/lib/ - Core library helpers (tekton, sbom, image, etc.)
+    - policy/release/lib/ - Release-specific helpers (attestations, etc.)
     
     Args:
         repo_root: Repository root path
@@ -59,10 +63,11 @@ def extract_helpers(repo_root: Path) -> List[HelperFull]:
     Returns:
         List of HelperFull objects
     """
-    lib_dir = repo_root / "policy" / "lib"
-    if not lib_dir.exists():
-        print(f"Warning: {lib_dir} does not exist")
-        return []
+    # Directories to scan for helpers
+    lib_dirs = [
+        repo_root / "policy" / "lib",           # Core library
+        repo_root / "policy" / "release" / "lib",  # Release-specific (has pipelinerun_attestations)
+    ]
     
     # Initialize AST parser
     try:
@@ -72,18 +77,27 @@ def extract_helpers(repo_root: Path) -> List[HelperFull]:
         return extract_helpers_regex_fallback(repo_root)
     
     helpers = []
+    total_files = 0
     
-    # Find all .rego files (excluding tests)
-    rego_files = [f for f in lib_dir.rglob("*.rego") if "_test.rego" not in f.name]
+    for lib_dir in lib_dirs:
+        if not lib_dir.exists():
+            print(f"Skipping {lib_dir} (does not exist)")
+            continue
+        
+        # Find all .rego files (excluding tests)
+        rego_files = [f for f in lib_dir.rglob("*.rego") if "_test.rego" not in f.name]
+        total_files += len(rego_files)
+        
+        for rego_file in rego_files:
+            try:
+                file_helpers = extract_helpers_from_file_ast(parser, rego_file, repo_root)
+                helpers.extend(file_helpers)
+            except Exception as e:
+                print(f"Warning: Could not process {rego_file}: {e}")
+        
+        print(f"  Scanned {lib_dir.relative_to(repo_root)}: {len(rego_files)} files")
     
-    for rego_file in rego_files:
-        try:
-            file_helpers = extract_helpers_from_file_ast(parser, rego_file, repo_root)
-            helpers.extend(file_helpers)
-        except Exception as e:
-            print(f"Warning: Could not process {rego_file}: {e}")
-    
-    print(f"Extracted {len(helpers)} helpers from {len(rego_files)} files (using AST)")
+    print(f"Extracted {len(helpers)} helpers from {total_files} files (using AST)")
     return helpers
 
 
