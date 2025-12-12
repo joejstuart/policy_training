@@ -66,6 +66,71 @@ except ImportError:
     RAG_AVAILABLE = False
 
 
+class OllamaGenerator:
+    """Generate responses using Ollama API."""
+    
+    def __init__(self, model: str = "qwen3-coder:30b", base_url: str = "http://localhost:11434"):
+        self.model = model
+        self.base_url = base_url
+        self._available = None
+    
+    def is_available(self) -> bool:
+        """Check if Ollama is available."""
+        if self._available is not None:
+            return self._available
+        
+        import urllib.request
+        try:
+            req = urllib.request.Request(f"{self.base_url}/api/tags")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                self._available = resp.status == 200
+        except:
+            self._available = False
+        
+        return self._available
+    
+    def generate(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        max_tokens: int = 2048,
+        temperature: float = 0.1,
+    ) -> str:
+        """Generate completion from Ollama."""
+        import json
+        import urllib.request
+        
+        # Build messages for chat API
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        data = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "num_predict": max_tokens,
+                "temperature": temperature,
+            }
+        }
+        
+        try:
+            req = urllib.request.Request(
+                f"{self.base_url}/api/chat",
+                data=json.dumps(data).encode('utf-8'),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                result = json.loads(resp.read().decode('utf-8'))
+                return result.get("message", {}).get("content", "")
+        except Exception as e:
+            print(f"Ollama error: {e}")
+            return ""
+
+
 class RAGContextRetriever:
     """Retrieve context from Knowledge Base using hybrid search."""
     
@@ -248,7 +313,7 @@ class RAGContextRetriever:
                     else:
                         full_sig = base_sig
                     
-                    desc = helper.description[:70] if helper.description else ""
+                    desc = helper.description if helper.description else ""
                     if desc:
                         parts.append(f"- {full_sig} -- {desc}")
                     else:
@@ -417,6 +482,7 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
         base_model: str = "Qwen/Qwen3-4B-Instruct-2507",
         device: str = "auto",
         rag_retriever: Optional[RAGContextRetriever] = None,
+        ollama_model: Optional[str] = None,
     ):
         self.device = self._detect_device(device)
         print(f"Using device: {self.device}")
@@ -426,6 +492,17 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
         self.stage2_model = None
         self.stage2_tokenizer = None
         self.rag_retriever = rag_retriever
+        self.ollama = None
+        
+        # Use Ollama for Stage 2 if specified
+        if ollama_model:
+            print(f"Using Ollama model: {ollama_model}")
+            self.ollama = OllamaGenerator(model=ollama_model)
+            if not self.ollama.is_available():
+                raise RuntimeError(
+                    f"Ollama not available. Make sure it's running: ollama serve"
+                )
+            print("  ✓ Ollama ready")
         
         # Load Stage 1 model if path provided
         if stage1_model_path:
@@ -434,8 +511,8 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
                 stage1_model_path, base_model
             )
         
-        # Load Stage 2 model if path provided
-        if stage2_model_path:
+        # Load Stage 2 model if path provided (skip if using Ollama)
+        if stage2_model_path and not ollama_model:
             print(f"Loading Stage 2 model from {stage2_model_path}...")
             self.stage2_tokenizer, self.stage2_model = self._load_model(
                 stage2_model_path, base_model
@@ -608,12 +685,7 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
         Args:
             use_pattern_reminder: If True, append pattern hints to help model accuracy
         """
-        if self.stage2_model is None:
-            raise RuntimeError("Stage 2 model not loaded. Provide --stage2-model path.")
-        
-        # Build user content EXACTLY matching training format:
-        # instruction + "\n" + input (where input = "REQUIREMENTS:\n..." + "\n\n" + context)
-        # See: train_policy.py lines 169-177 and generate_two_stage_dataset.py Stage2Example.format_input()
+        # Build user content
         input_text = f"REQUIREMENTS:\n{requirements}\n\n{context}"
         
         # Optionally add pattern reminder for better accuracy
@@ -621,6 +693,19 @@ TESTS: Test functions with _mock fixtures for pass/fail cases"""
             input_text += self.STAGE2_PATTERN_REMINDER
         
         user_content = f"{self.STAGE2_INSTRUCTION}\n{input_text}"
+        
+        # Use Ollama if available
+        if self.ollama is not None:
+            return self.ollama.generate(
+                prompt=user_content,
+                system_prompt=self.SYSTEM_PROMPT,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        
+        # Use HuggingFace model
+        if self.stage2_model is None:
+            raise RuntimeError("Stage 2 model not loaded. Provide --stage2-model or --ollama.")
         
         messages = self._build_messages(self.SYSTEM_PROMPT, user_content)
         
@@ -760,17 +845,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # RAG mode (recommended): Use KB retrieval instead of Stage 1 model
+  # RAG + Ollama (recommended): No fine-tuned model needed
+  python src/infer_two_stage.py \\
+      --use-rag \\
+      --ollama qwen3-coder:30b \\
+      --instruction "Check that task bundles are pinned"
+
+  # RAG + Ollama with smaller model
+  python src/infer_two_stage.py \\
+      --use-rag \\
+      --ollama qwen3-coder:8b \\
+      --instruction "Verify SBOM contains required packages"
+
+  # RAG mode with fine-tuned Stage 2 model
   python src/infer_two_stage.py \\
       --use-rag \\
       --stage2-model models/stage2-rule-generation \\
       --instruction "Check that task bundles are pinned"
-
-  # RAG mode with more helpers
-  python src/infer_two_stage.py \\
-      --use-rag --top-k-helpers 8 --top-k-schemas 5 \\
-      --stage2-model models/stage2-rule-generation \\
-      --instruction "Verify SBOM contains required packages"
 
   # Full two-stage pipeline (with Stage 1 model)
   python src/infer_two_stage.py \\
@@ -892,16 +983,22 @@ Examples:
         default=3,
         help="Number of schemas to retrieve in RAG mode (default: 3)",
     )
+    parser.add_argument(
+        "--ollama",
+        type=str,
+        metavar="MODEL",
+        help="Use Ollama model for Stage 2 (e.g., qwen3-coder:30b, qwen3-coder:8b)",
+    )
     
     args = parser.parse_args()
     
     # Validate arguments
     if args.stage == 1 and not args.stage1_model and not args.use_rag:
         parser.error("--stage1-model required for Stage 1 (or use --use-rag)")
-    if args.stage == 2 and not args.stage2_model:
-        parser.error("--stage2-model required for Stage 2")
-    if not args.stage and not args.stage1_model and not args.stage2_model and not args.use_rag:
-        parser.error("Provide at least one of --stage1-model, --stage2-model, or --use-rag")
+    if args.stage == 2 and not args.stage2_model and not args.ollama:
+        parser.error("--stage2-model or --ollama required for Stage 2")
+    if not args.stage and not args.stage1_model and not args.stage2_model and not args.use_rag and not args.ollama:
+        parser.error("Provide at least one of --stage1-model, --stage2-model, --use-rag, or --ollama")
     
     # Load context from file if provided
     context = args.context
@@ -925,6 +1022,7 @@ Examples:
         base_model=args.base_model,
         device=args.device,
         rag_retriever=rag_retriever,
+        ollama_model=args.ollama,
     )
     
     verbose = not args.quiet
