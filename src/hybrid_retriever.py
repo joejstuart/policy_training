@@ -152,8 +152,8 @@ class HybridRetriever:
         query: str,
         helper_k: int = 4,
         schema_k: int = 2,
-        bm25_weight: float = 0.3,
-        vector_weight: float = 0.7,
+        bm25_weight: float = 0.1,
+        vector_weight: float = 0.9,
     ) -> RetrievalResult:
         """Retrieve relevant helpers and schemas.
         
@@ -201,50 +201,54 @@ class HybridRetriever:
         top_k: int,
         bm25_weight: float,
         vector_weight: float,
+        rrf_k: int = 60,
     ) -> List[Dict[str, Any]]:
         """Retrieve from a single type (helpers or schemas).
+        
+        Uses Reciprocal Rank Fusion (RRF) to combine results from vector
+        and BM25 search. RRF is more robust than weighted averages because
+        it uses rank positions rather than raw scores.
+        
+        RRF formula: score(d) = sum over rankings: weight / (k + rank(d))
         
         Args:
             query: Query text
             vector_index: Vector index (optional)
             bm25_index: BM25 index (optional)
             top_k: Maximum results
-            bm25_weight: Weight for BM25 scores
-            vector_weight: Weight for vector scores
+            bm25_weight: Weight for BM25 ranking contribution
+            vector_weight: Weight for vector ranking contribution
+            rrf_k: RRF constant (default 60, higher = more weight to lower ranks)
             
         Returns:
             List of chunk metadata
         """
-        # Collect results with scores
-        scores: Dict[str, float] = {}  # chunk_id -> combined score
+        # Collect RRF scores and metadata
+        rrf_scores: Dict[str, float] = {}  # chunk_id -> RRF score
         chunks: Dict[str, Dict] = {}   # chunk_id -> chunk metadata
         
-        # Query vector index
+        # Query vector index and add RRF scores
         if vector_index is not None:
             vector_results = vector_index.search(query, top_k=20)
-            for r in vector_results:
+            for rank, r in enumerate(vector_results, start=1):
                 chunk_id = r.chunk_id
-                # Normalize vector score (already 0-1 for cosine)
-                normalized_score = max(0, r.score)
-                scores[chunk_id] = scores.get(chunk_id, 0) + (normalized_score * vector_weight)
+                # RRF contribution: weight / (k + rank)
+                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + (vector_weight / (rrf_k + rank))
                 if chunk_id not in chunks:
                     chunks[chunk_id] = r.metadata
         
-        # Query BM25 index
+        # Query BM25 index and add RRF scores
         if bm25_index is not None:
             bm25_results = bm25_index.search(query, top_k=20)
-            if bm25_results:
-                # Normalize BM25 scores (0-1 based on max)
-                max_bm25 = max(r.score for r in bm25_results) if bm25_results else 1
-                for r in bm25_results:
-                    chunk_id = r.chunk_id
-                    normalized_score = r.score / max_bm25 if max_bm25 > 0 else 0
-                    scores[chunk_id] = scores.get(chunk_id, 0) + (normalized_score * bm25_weight)
-                    if chunk_id not in chunks:
-                        chunks[chunk_id] = r.metadata
+            for rank, r in enumerate(bm25_results, start=1):
+                chunk_id = r.chunk_id
+                # RRF contribution: weight / (k + rank)
+                rrf_scores[chunk_id] = rrf_scores.get(chunk_id, 0) + (bm25_weight / (rrf_k + rank))
+                if chunk_id not in chunks:
+                    chunks[chunk_id] = r.metadata
         
-        # Sort by combined score and take top_k
-        sorted_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:top_k]
+        # Sort by RRF score and take top_k
+        sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)[:top_k]
         
         # Return metadata for top results
         return [chunks[chunk_id] for chunk_id in sorted_ids if chunk_id in chunks]

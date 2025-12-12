@@ -266,6 +266,14 @@ def create_helper_chunks(helpers: List[Dict]) -> List[Dict]:
 def create_schema_chunks(schemas: List[Dict]) -> List[Dict]:
     """Create indexable chunks from schema data.
     
+    Uses a focused text representation that emphasizes:
+    - Leaf field name (not full path to avoid false matches on common parent names)
+    - Description (semantic meaning)
+    - Keywords (domain-specific terms)
+    - Use cases
+    
+    This avoids false similarity from common path elements like "tasks" or "predicate".
+    
     Args:
         schemas: List of schema dictionaries (from schemas.jsonl)
         
@@ -274,17 +282,28 @@ def create_schema_chunks(schemas: List[Dict]) -> List[Dict]:
     """
     chunks = []
     for schema in schemas:
-        # Build searchable text
+        # Extract leaf field name from path (e.g., "serviceAccountName" from full path)
+        path = schema.get('canonical_path', '')
+        leaf_name = path.split('.')[-1].replace('[*]', '').replace('$', '')
+        
+        # Build searchable text focused on semantic content, not full path
         text_parts = [
-            f"Schema: {schema.get('schema_id', '')}",
-            f"Path: {schema.get('canonical_path', '')}",
-            f"Type: {schema.get('field_type', '')}",
-            f"Attestation: {schema.get('attestation_type', '')}",
+            f"Field: {leaf_name}",
             f"Description: {schema.get('description', '')}",
         ]
+        
+        # Add keywords (critical for matching domain terms like "bundle", "pinned")
+        keywords = schema.get('keywords', [])
+        if keywords:
+            text_parts.append(f"Keywords: {', '.join(keywords)}")
+        
+        # Add use cases
         use_when = schema.get('use_when', [])
         if use_when:
             text_parts.append(f"Use when: {', '.join(use_when)}")
+        
+        # Add attestation type for context
+        text_parts.append(f"Attestation: {schema.get('attestation_type', '')}")
         
         chunks.append({
             'id': schema.get('schema_id', ''),

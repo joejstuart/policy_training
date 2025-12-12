@@ -47,19 +47,54 @@ class BM25Index:
         if not BM25_AVAILABLE:
             print("Warning: rank-bm25 not available. Install with: pip install rank-bm25")
     
+    def _simple_stem(self, word: str) -> str:
+        """Simple stemmer for common English suffixes.
+        
+        Handles: -s, -es, -ed, -ing, -ies
+        This is lightweight and doesn't require additional dependencies.
+        Goal: CVEs->cve, images->image, patches->patch, vulnerabilities->vulnerability
+        """
+        if len(word) <= 3:
+            return word
+        
+        # ies -> y (e.g., vulnerabilities -> vulnerability)
+        if word.endswith('ies') and len(word) > 4:
+            return word[:-3] + 'y'
+        # ches, shes, xes, sses, zes -> remove es (e.g., patches -> patch)
+        if word.endswith(('ches', 'shes', 'xes', 'sses', 'zes')) and len(word) > 4:
+            return word[:-2]
+        # s -> remove for simple plurals (e.g., images -> image, cves -> cve)
+        # Skip words ending in ss, us, is
+        if word.endswith('s') and not word.endswith(('ss', 'us', 'is')) and len(word) > 3:
+            return word[:-1]
+        # ed -> remove for past tense (e.g., pinned -> pin)
+        if word.endswith('ed') and len(word) > 4:
+            if word[-3] == word[-4]:  # doubled consonant: pinned -> pin
+                return word[:-3]
+            return word[:-2]
+        # ing -> remove (e.g., running -> run)
+        if word.endswith('ing') and len(word) > 5:
+            if word[-4] == word[-5]:  # doubled consonant: running -> run
+                return word[:-4]
+            return word[:-3]
+        
+        return word
+    
     def _tokenize(self, text: str) -> List[str]:
-        """Tokenize text for BM25.
+        """Tokenize text for BM25 with simple stemming.
         
         Preserves important patterns like:
         - tekton.task_ref
         - lib.pipelinerun_attestations
         - $.predicate.buildConfig
         
+        Uses simple stemming so "CVEs" matches "CVE", "patches" matches "patch".
+        
         Args:
             text: Text to tokenize
             
         Returns:
-            List of tokens
+            List of tokens (stemmed)
         """
         # Lowercase
         text = text.lower()
@@ -71,15 +106,16 @@ class BM25Index:
         # Also get individual words
         words = re.findall(r'[a-z]{2,}', text)
         
-        # Combine, keeping dotted patterns and their parts
+        # Combine, keeping dotted patterns and their parts (with stemming)
         tokens = []
         for p in protected:
             tokens.append(p)
-            # Also add parts split by dots and underscores
+            # Also add parts split by dots and underscores (stemmed)
             parts = re.split(r'[._]', p)
-            tokens.extend(p for p in parts if len(p) >= 2)
+            tokens.extend(self._simple_stem(part) for part in parts if len(part) >= 2)
         
-        tokens.extend(words)
+        # Stem individual words too
+        tokens.extend(self._simple_stem(w) for w in words)
         
         # Dedupe while preserving order
         seen = set()

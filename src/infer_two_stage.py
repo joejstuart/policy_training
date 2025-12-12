@@ -241,30 +241,40 @@ class RAGContextRetriever:
     def _format_context(self, results, query: str) -> str:
         """Format retrieval results as Stage 1-style context.
         
+        Includes ranking hints so the model knows to prioritize top results.
+        
         Args:
             results: RetrievalResult from HybridRetriever
             query: Original query
         """
         parts = []
         
+        # Add ranking guidance at the top
+        parts.append("NOTE: Items are ranked by relevance. Prioritize items marked [1] over [2], etc.")
+        parts.append("")
+        
         # ATTESTATION_SCHEMA section (from retrieved schemas)
         schema_results = results.schemas
         if schema_results:
             parts.append("ATTESTATION_SCHEMA:")
             att_types = set()
-            for item in schema_results:
+            for rank, item in enumerate(schema_results, start=1):
                 schema_id = item.get("schema_id") or item.get("id", "")
                 schema = self.kb.get_schema(schema_id)
                 if schema:
                     # Convert JSONPath [*] to Rego iteration hint
                     rego_path = self._jsonpath_to_rego_hint(schema.canonical_path)
-                    parts.append(f"- {rego_path}")
+                    # Add rank indicator - top item gets emphasis
+                    if rank == 1:
+                        parts.append(f"[{rank}] {rego_path}  <- MOST RELEVANT")
+                    else:
+                        parts.append(f"[{rank}] {rego_path}")
                     att_types.add(schema.attestation_type)
             parts.append("")
             
             # Note attestation type from schemas
             if att_types:
-                parts.insert(1, f"- Attestation type: {', '.join(att_types)}")
+                parts.insert(2, f"- Attestation type: {', '.join(att_types)}")
         
         # AVAILABLE_HELPERS section
         helper_results = results.helpers
@@ -288,9 +298,9 @@ class RAGContextRetriever:
                     parts.append(f"- {imp}")
                 parts.append("")
             
-            parts.append("AVAILABLE_HELPERS:")
+            parts.append("AVAILABLE_HELPERS (ranked by relevance):")
             
-            for item in helper_results:
+            for rank, item in enumerate(helper_results, start=1):
                 helper_id = item.get("id", "")
                 helper = self.kb.get_helper_card(helper_id)
                 if helper:
@@ -305,10 +315,18 @@ class RAGContextRetriever:
                         full_sig = base_sig
                     
                     desc = helper.description if helper.description else ""
-                    if desc:
-                        parts.append(f"- {full_sig} -- {desc}")
+                    # Top 2 helpers get emphasis
+                    if rank <= 2:
+                        marker = f"[{rank}]"
+                        if desc:
+                            parts.append(f"{marker} {full_sig} -- {desc}")
+                        else:
+                            parts.append(f"{marker} {full_sig}")
                     else:
-                        parts.append(f"- {full_sig}")
+                        if desc:
+                            parts.append(f"[{rank}] {full_sig} -- {desc}")
+                        else:
+                            parts.append(f"[{rank}] {full_sig}")
             parts.append("")
         
         # RULE_DATA_KEYS section (infer from query and helpers)
