@@ -84,10 +84,10 @@ FIELD_DOCS: dict[str, FieldDoc] = {
     "$.predicate.buildType": FieldDoc(
         json_path="$.predicate.buildType",
         go_type="string",
-        description="URI identifying the type of build (e.g., tekton.dev/v1beta1/PipelineRun or tekton.dev/v1beta1/TaskRun)",
+        description="URI identifying the attestation build type (PipelineRun vs TaskRun). Rarely needed in policies",
         source_file="pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
         example_values=["tekton.dev/v1beta1/PipelineRun", "tekton.dev/v1beta1/TaskRun"],
-        keywords=["build type", "pipeline", "taskrun", "tekton"]
+        keywords=["build type uri", "pipelinerun type", "attestation type"]
     ),
     
     # Materials - source inputs
@@ -229,10 +229,10 @@ FIELD_DOCS: dict[str, FieldDoc] = {
     "$.predicate.buildConfig.tasks[*].results[*].name": FieldDoc(
         json_path="$.predicate.buildConfig.tasks[*].results[*].name",
         go_type="string",
-        description="Name of a result produced by the task. Common results: IMAGE_URL, IMAGE_DIGEST, CHAINS-GIT_URL, CHAINS-GIT_COMMIT, SBOM_BLOB_URL",
+        description="Name of a result produced by the task. Check this field to verify specific task results exist or match expected names",
         source_file="vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/result_types.go",
-        example_values=["IMAGE_URL", "IMAGE_DIGEST", "CHAINS-GIT_URL", "CHAINS-GIT_COMMIT", "SBOM_BLOB_URL"],
-        keywords=["result name", "output", "image url", "image digest", "git commit", "sbom"]
+        example_values=["IMAGE_URL", "IMAGE_DIGEST", "CHAINS-GIT_URL", "CHAINS-GIT_COMMIT", "SBOM_BLOB_URL", "REPORTS"],
+        keywords=["task result", "result name", "output name", "task output", "check result", "verify result", "result exists"]
     ),
     "$.predicate.buildConfig.tasks[*].results[*].type": FieldDoc(
         json_path="$.predicate.buildConfig.tasks[*].results[*].type",
@@ -383,20 +383,19 @@ def generate_schema_docs(output_path: Path):
 
 
 def enrich_kb_schemas(kb_path: Path, docs_path: Path):
-    """Enrich KB schemas with documentation from chains source."""
+    """Enrich KB schemas with documentation from chains source.
+    
+    Only enriches SLSA provenance schemas - SBOM schemas have their own docs.
+    """
     # Load docs
     with open(docs_path) as f:
         docs = json.load(f)
     
-    # Build lookup by normalized path
+    # Build lookup by normalized path (full path match only)
     docs_by_path = {}
     for doc in docs:
         normalized = normalize_path(doc["json_path"])
         docs_by_path[normalized] = doc
-        # Also index by leaf field name
-        leaf = doc["json_path"].split(".")[-1]
-        if leaf not in docs_by_path:
-            docs_by_path[leaf] = doc
     
     # Load schemas
     schemas_file = kb_path / "schemas.jsonl"
@@ -411,16 +410,20 @@ def enrich_kb_schemas(kb_path: Path, docs_path: Path):
                 schemas.append(json.loads(line))
     
     enriched_count = 0
+    skipped_count = 0
     for schema in schemas:
+        att_type = schema.get("attestation_type", "")
+        
+        # Only enrich SLSA provenance schemas, not SBOM
+        if att_type not in ("slsa_provenance_v02", "slsa_provenance"):
+            skipped_count += 1
+            continue
+        
         path = schema.get("canonical_path", "")
         normalized = normalize_path(path)
         
-        # Try to find matching doc
+        # Try to find matching doc by full path
         doc = docs_by_path.get(normalized)
-        if not doc:
-            # Try leaf match
-            leaf = path.split(".")[-1]
-            doc = docs_by_path.get(leaf)
         
         if doc:
             # Enrich with source documentation

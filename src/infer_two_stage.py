@@ -186,6 +186,8 @@ class RAGContextRetriever:
         
         Splits retrieval into domain-specific and boilerplate queries
         to ensure we get both specialized and common helpers.
+        
+        Includes validation gate to filter helpers by detected attestation type.
         """
         from hybrid_retriever import RetrievalResult
         
@@ -197,6 +199,9 @@ class RAGContextRetriever:
             helper_k=helper_k - 2,  # Reserve space for boilerplate
             schema_k=schema_k,
         )
+        
+        # Detect attestation domain from schemas
+        detected_domain = self._detect_domain(domain_results.schemas, query_lower)
         
         # Facet 2: Boilerplate helpers for deny rules
         boilerplate_query = "deny rule result helper create violation output metadata"
@@ -214,19 +219,19 @@ class RAGContextRetriever:
             schema_k=0,
         )
         
-        # Merge and dedupe helpers
+        # Merge and dedupe helpers, with domain filtering
         seen_ids = set()
         merged_helpers = []
         
         for h in domain_results.helpers:
             hid = h.get("id", "")
-            if hid not in seen_ids:
+            if hid not in seen_ids and self._helper_matches_domain(hid, detected_domain):
                 seen_ids.add(hid)
                 merged_helpers.append(h)
         
         for h in boilerplate_results.helpers + access_results.helpers:
             hid = h.get("id", "")
-            if hid not in seen_ids:
+            if hid not in seen_ids and self._helper_matches_domain(hid, detected_domain):
                 seen_ids.add(hid)
                 merged_helpers.append(h)
         
@@ -237,6 +242,56 @@ class RAGContextRetriever:
             helpers=merged_helpers,
             schemas=domain_results.schemas,
         )
+    
+    def _detect_domain(self, schemas: list, query_lower: str) -> str:
+        """Detect the attestation domain from retrieved schemas and query.
+        
+        Returns: 'slsa', 'sbom', or 'any'
+        """
+        # Check query keywords first
+        sbom_keywords = ['sbom', 'package', 'component', 'license', 'purl', 'cyclonedx', 'spdx']
+        if any(kw in query_lower for kw in sbom_keywords):
+            return 'sbom'
+        
+        # SLSA/provenance keywords (includes CVE since scans are in pipeline results)
+        slsa_keywords = ['task', 'pipeline', 'attestation', 'bundle', 'pinned', 'material', 
+                        'result', 'cve', 'vulnerability', 'scan', 'image', 'digest', 'git']
+        if any(kw in query_lower for kw in slsa_keywords):
+            return 'slsa'
+        
+        # Fall back to schema types
+        schema_types = set(s.get('attestation_type', '') for s in schemas)
+        
+        if all('sbom' in t for t in schema_types if t):
+            return 'sbom'
+        if all('slsa' in t or 'provenance' in t for t in schema_types if t):
+            return 'slsa'
+        
+        return 'any'
+    
+    def _helper_matches_domain(self, helper_id: str, domain: str) -> bool:
+        """Check if a helper matches the detected domain.
+        
+        Filters out cross-domain helpers (e.g., SBOM helpers for SLSA queries).
+        """
+        if domain == 'any':
+            return True
+        
+        # SBOM helpers should only appear for SBOM queries
+        sbom_modules = ['lib.sbom', 'sbom.']
+        is_sbom_helper = any(helper_id.startswith(m) or f'.{m}' in helper_id for m in sbom_modules)
+        
+        if domain == 'slsa' and is_sbom_helper:
+            return False
+        
+        # Tekton helpers should only appear for SLSA queries
+        tekton_modules = ['lib.tekton', 'tekton.']
+        is_tekton_helper = any(helper_id.startswith(m) or f'.{m}' in helper_id for m in tekton_modules)
+        
+        if domain == 'sbom' and is_tekton_helper:
+            return False
+        
+        return True
     
     def _format_context(self, results, query: str) -> str:
         """Format retrieval results as Stage 1-style context.

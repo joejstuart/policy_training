@@ -99,17 +99,16 @@
   {
     "json_path": "$.predicate.buildType",
     "go_type": "string",
-    "description": "URI identifying the type of build (e.g., tekton.dev/v1beta1/PipelineRun or tekton.dev/v1beta1/TaskRun)",
+    "description": "URI identifying the attestation build type (PipelineRun vs TaskRun). Rarely needed in policies",
     "source_file": "pkg/chains/formats/slsa/v1/pipelinerun/pipelinerun.go",
     "example_values": [
       "tekton.dev/v1beta1/PipelineRun",
       "tekton.dev/v1beta1/TaskRun"
     ],
     "keywords": [
-      "build type",
-      "pipeline",
-      "taskrun",
-      "tekton"
+      "build type uri",
+      "pipelinerun type",
+      "attestation type"
     ]
   },
   {
@@ -379,22 +378,24 @@
   {
     "json_path": "$.predicate.buildConfig.tasks[*].results[*].name",
     "go_type": "string",
-    "description": "Name of a result produced by the task. Common results: IMAGE_URL, IMAGE_DIGEST, CHAINS-GIT_URL, CHAINS-GIT_COMMIT, SBOM_BLOB_URL",
+    "description": "Name of a result produced by the task. Check this field to verify specific task results exist or match expected names",
     "source_file": "vendor/github.com/tektoncd/pipeline/pkg/apis/pipeline/v1/result_types.go",
     "example_values": [
       "IMAGE_URL",
       "IMAGE_DIGEST",
       "CHAINS-GIT_URL",
       "CHAINS-GIT_COMMIT",
-      "SBOM_BLOB_URL"
+      "SBOM_BLOB_URL",
+      "REPORTS"
     ],
     "keywords": [
+      "task result",
       "result name",
-      "output",
-      "image url",
-      "image digest",
-      "git commit",
-      "sbom"
+      "output name",
+      "task output",
+      "check result",
+      "verify result",
+      "result exists"
     ]
   },
   {
