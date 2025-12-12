@@ -136,24 +136,37 @@ class RAGContextRetriever:
                 schema_id = item.get("schema_id") or item.get("id", "")
                 schema = self.kb.get_schema(schema_id)
                 if schema:
-                    parts.append(f"- {schema.canonical_path}")
+                    # Convert JSONPath [*] to Rego iteration hint
+                    rego_path = self._jsonpath_to_rego_hint(schema.canonical_path)
+                    parts.append(f"- {rego_path}")
                     att_types.add(schema.attestation_type)
             parts.append("")
             
-            # Infer attestation type from schemas
+            # Add attestation access pattern hint based on type
             if att_types:
                 att_type = list(att_types)[0]  # Primary type
                 if "slsa" in att_type.lower():
                     parts.insert(1, "- Attestation type: SLSA Provenance")
+                    parts.insert(2, "- Access pattern: some att in lib.pipelinerun_attestations; then att.predicate...")
                 elif "spdx" in att_type.lower():
                     parts.insert(1, "- Attestation type: SPDX SBOM")
+                    parts.insert(2, "- Access pattern: some sbom in sbom.spdx_sboms; then sbom.packages...")
                 elif "cyclonedx" in att_type.lower():
                     parts.insert(1, "- Attestation type: CycloneDX SBOM")
+                    parts.insert(2, "- Access pattern: some sbom in sbom.cyclonedx_sboms; then sbom.components...")
         
         # AVAILABLE_HELPERS section
         helper_results = results.helpers
         if helper_results:
             parts.append("AVAILABLE_HELPERS:")
+            
+            # Check if this is task-related and add common pattern
+            helper_names = [item.get("id", "") for item in helper_results]
+            if any("task" in h.lower() for h in helper_names):
+                parts.append("# Common pattern for tasks: some task in tekton.tasks(att)")
+            if any("sbom" in h.lower() or "package" in h.lower() for h in helper_names):
+                parts.append("# Common pattern for SBOMs: some pkg in sbom.packages")
+            
             for item in helper_results:
                 helper_id = item.get("id", "")
                 helper = self.kb.get_helper_card(helper_id)
@@ -181,6 +194,54 @@ class RAGContextRetriever:
         parts.append(f"SUGGESTED_RULE_TYPE: {rule_type}")
         
         return "\n".join(parts)
+    
+    def _jsonpath_to_rego_hint(self, jsonpath: str) -> str:
+        """Convert JSONPath notation to Rego-friendly path description.
+        
+        JSONPath uses [*] for array iteration, but Rego uses "some X in array".
+        
+        Example:
+            $.predicate.buildConfig.tasks[*].ref.bundle
+            → .predicate.buildConfig.tasks[].ref.bundle (iterate with: some task in tasks)
+        """
+        import re
+        
+        # Remove leading $. if present
+        path = jsonpath.lstrip('$').lstrip('.')
+        
+        # Find array patterns and convert to Rego hints
+        # Pattern: field[*] or field[0] etc.
+        array_pattern = r'(\w+)\[\*\]'
+        
+        # Replace [*] with [] and note the iteration variable
+        iteration_vars = []
+        
+        def replace_array(match):
+            field_name = match.group(1)
+            # Suggest singular form for iteration variable
+            if field_name.endswith('ies'):
+                var_name = field_name[:-3] + 'y'  # entries -> entry
+            elif field_name.endswith('es'):
+                var_name = field_name[:-2]  # boxes -> box
+            elif field_name.endswith('s'):
+                var_name = field_name[:-1]  # tasks -> task
+            else:
+                var_name = field_name
+            iteration_vars.append((field_name, var_name))
+            return f"{field_name}[]"
+        
+        converted_path = re.sub(array_pattern, replace_array, path)
+        
+        # Build Rego access pattern
+        if iteration_vars:
+            # Show how to iterate in Rego
+            iterations = []
+            for field, var in iteration_vars:
+                iterations.append(f"some {var} in {field}")
+            rego_hint = f".{converted_path} (Rego: {'; '.join(iterations)})"
+            return rego_hint
+        
+        return f".{converted_path}"
     
     def _infer_rule_data_keys(self, query: str, helper_results: List[Dict]) -> List[str]:
         """Infer rule_data keys from query and helpers."""
