@@ -1,0 +1,24 @@
+{
+  "total_examples": 41120,
+  "train_examples": 37008,
+  "eval_examples": 4112,
+  "by_type": {
+    "schema": 3463,
+    "helper": 37657
+  },
+  "by_source": {
+    "training_data_variation": 31236,
+    "training_data": 7920,
+    "production_rules_variation": 429,
+    "curated_variation": 1035,
+    "curated": 402,
+    "production_rules": 98
+  },
+  "by_domain": {
+    "sbom": 10373,
+    "slsa": 30377,
+    "spdx_sbom": 87,
+    "any": 245,
+    "cyclonedx_sbom": 38
+  }
+}
