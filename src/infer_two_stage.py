@@ -311,9 +311,22 @@ class RAGContextRetriever:
         # ATTESTATION_SCHEMA section (from retrieved schemas)
         schema_results = results.schemas
         if schema_results:
-            parts.append("ATTESTATION_SCHEMA:")
+            # Filter schemas by relevance score (keep top 60% of top score)
+            top_schema_score = schema_results[0].get('_rrf_score', 1.0) if schema_results else 1.0
+            min_schema_score = top_schema_score * 0.4  # More lenient for schemas
+            
+            filtered_schemas = [
+                s for s in schema_results 
+                if s.get('_rrf_score', 1.0) >= min_schema_score
+            ]
+            
+            # Always keep at least the top schema
+            if not filtered_schemas and schema_results:
+                filtered_schemas = schema_results[:1]
+            
             att_types = set()
-            for rank, item in enumerate(schema_results, start=1):
+            parts.append("ATTESTATION_SCHEMA:")
+            for rank, item in enumerate(filtered_schemas, start=1):
                 schema_id = item.get("schema_id") or item.get("id", "")
                 schema = self.kb.get_schema(schema_id)
                 if schema:
@@ -334,10 +347,24 @@ class RAGContextRetriever:
         # AVAILABLE_HELPERS section
         helper_results = results.helpers
         if helper_results:
-            # Derive imports from retrieved helpers
+            # Filter out low-relevance helpers based on RRF score
+            # Keep only helpers with score >= 50% of top score
+            top_score = helper_results[0].get('_rrf_score', 1.0) if helper_results else 1.0
+            min_score = top_score * 0.5
+            
+            filtered_helpers = [
+                h for h in helper_results 
+                if h.get('_rrf_score', 1.0) >= min_score
+            ]
+            
+            # If all helpers were filtered, keep at least the top one
+            if not filtered_helpers and helper_results:
+                filtered_helpers = helper_results[:1]
+            
+            # Derive imports from filtered helpers
             imports_needed = set()
             
-            for item in helper_results:
+            for item in filtered_helpers:
                 helper_id = item.get("id", "")
                 module_prefix = self._get_module_prefix(helper_id)
                 
@@ -353,9 +380,10 @@ class RAGContextRetriever:
                     parts.append(f"- {imp}")
                 parts.append("")
             
-            parts.append("AVAILABLE_HELPERS (ranked by relevance):")
+            if filtered_helpers:
+                parts.append("AVAILABLE_HELPERS (ranked by relevance):")
             
-            for rank, item in enumerate(helper_results, start=1):
+            for rank, item in enumerate(filtered_helpers, start=1):
                 helper_id = item.get("id", "")
                 helper = self.kb.get_helper_card(helper_id)
                 if helper:

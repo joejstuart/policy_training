@@ -250,8 +250,14 @@ class HybridRetriever:
         # Sort by RRF score and take top_k
         sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)[:top_k]
         
-        # Return metadata for top results
-        return [chunks[chunk_id] for chunk_id in sorted_ids if chunk_id in chunks]
+        # Return metadata for top results, including RRF score
+        results = []
+        for chunk_id in sorted_ids:
+            if chunk_id in chunks:
+                chunk = chunks[chunk_id].copy()
+                chunk['_rrf_score'] = rrf_scores[chunk_id]
+                results.append(chunk)
+        return results
     
     def retrieve_with_full(
         self,
