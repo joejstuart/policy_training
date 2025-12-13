@@ -120,6 +120,21 @@ class RetrievalTrainingGenerator:
             "negative_paths": ["ref.params[*].value", "tasks[*].name"],
             "domain": "slsa",
         },
+        # Trusted tasks - bundle reference verification
+        {
+            "queries": [
+                "trusted task reference",
+                "trusted tasks check",
+                "how trusted_tasks work",
+                "verify task is trusted",
+                "trusted task bundle",
+                "task trusted list",
+                "allowed task reference",
+            ],
+            "positive_path": "ref.params[*].value",
+            "negative_paths": ["tasks[*].status", "materials[*].digest", "tasks[*].name"],
+            "domain": "slsa",
+        },
         # Task results (CVE, etc.)
         {
             "queries": [
@@ -1283,6 +1298,38 @@ class RetrievalTrainingGenerator:
         
         return variations[:3]  # Limit variations per query
     
+    def load_rule_generated(self, filepath: Path):
+        """Load LLM-generated examples from policy rules."""
+        if not filepath.exists():
+            print(f"  Rule-generated file not found: {filepath}")
+            return
+        
+        print(f"\nLoading rule-generated examples from {filepath}...")
+        count = 0
+        
+        for line in filepath.read_text().strip().split('\n'):
+            if not line:
+                continue
+            
+            try:
+                data = json.loads(line)
+                
+                self.examples.append(RetrievalExample(
+                    query=data['query'],
+                    positive=data['positive'],
+                    positive_id=data['_positive_id'],
+                    negative=data['negative'],
+                    negative_id=data['_negative_id'],
+                    example_type=data['_type'],
+                    source=data['_source'],
+                    domain=data['_domain'],
+                ))
+                count += 1
+            except (json.JSONDecodeError, KeyError) as e:
+                continue
+        
+        print(f"  Loaded {count} rule-generated examples")
+    
     def save(self, output_dir: Path):
         """Save training data in sentence-transformers format."""
         output_dir = Path(output_dir)
@@ -1399,6 +1446,11 @@ def main():
     generator.generate_from_curated_mappings()
     generator.generate_from_training_data()
     generator.generate_from_production_rules()
+    
+    # Load LLM-generated examples from policy rules
+    rule_generated_file = Path(args.output_dir) / "rule_generated.jsonl"
+    generator.load_rule_generated(rule_generated_file)
+    
     generator.generate_query_variations()
     
     # Save

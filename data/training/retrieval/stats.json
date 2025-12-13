@@ -1,25 +1,27 @@
 {
-  "total_examples": 40073,
-  "train_examples": 36065,
-  "eval_examples": 4008,
+  "total_examples": 47177,
+  "train_examples": 42459,
+  "eval_examples": 4718,
   "by_type": {
-    "schema": 2008,
-    "helper": 38065
+    "schema": 2478,
+    "helper": 44699
   },
   "by_source": {
-    "training_data_variation": 29966,
+    "rule_generated_variation": 4913,
+    "training_data_variation": 30039,
+    "curated_variation": 1478,
     "training_data": 7614,
-    "curated_variation": 1416,
-    "curated": 550,
-    "production_rules": 98,
-    "production_rules_variation": 429
+    "curated": 571,
+    "rule_generated": 2042,
+    "production_rules_variation": 422,
+    "production_rules": 98
   },
   "by_domain": {
-    "sbom": 10306,
-    "slsa": 29241,
+    "slsa": 35059,
+    "sbom": 11454,
+    "image": 274,
     "any": 266,
-    "cyclonedx_sbom": 34,
-    "image": 136,
-    "spdx_sbom": 90
+    "cyclonedx_sbom": 36,
+    "spdx_sbom": 88
   }
 }
