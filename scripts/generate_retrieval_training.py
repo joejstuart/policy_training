@@ -305,6 +305,82 @@ class RetrievalTrainingGenerator:
             "negative_paths": ["packages[*].versionInfo", "components[*].name"],
             "domain": "sbom",
         },
+        # Statement type and predicate type
+        {
+            "queries": [
+                "attestation type",
+                "in-toto statement type",
+                "predicate type",
+                "SLSA attestation type",
+            ],
+            "positive_path": "_type",
+            "negative_paths": ["predicateType", "buildType"],
+            "domain": "slsa",
+        },
+        {
+            "queries": [
+                "SLSA predicate type",
+                "provenance predicate URI",
+                "predicate type URI",
+            ],
+            "positive_path": "predicateType",
+            "negative_paths": ["_type", "buildType"],
+            "domain": "slsa",
+        },
+        # Build invocation
+        {
+            "queries": [
+                "build type",
+                "pipeline or taskrun type",
+                "tekton build type",
+            ],
+            "positive_path": "buildType",
+            "negative_paths": ["predicateType", "tasks[*].name"],
+            "domain": "slsa",
+        },
+        # Task timing
+        {
+            "queries": [
+                "task start time",
+                "when task started",
+                "task startedOn timestamp",
+            ],
+            "positive_path": "tasks[*].startedOn",
+            "negative_paths": ["tasks[*].finishedOn", "tasks[*].status"],
+            "domain": "slsa",
+        },
+        {
+            "queries": [
+                "task end time",
+                "when task finished",
+                "task finishedOn timestamp",
+            ],
+            "positive_path": "tasks[*].finishedOn",
+            "negative_paths": ["tasks[*].startedOn", "tasks[*].status"],
+            "domain": "slsa",
+        },
+        # Invocation parameters
+        {
+            "queries": [
+                "pipeline parameters",
+                "build invocation parameters",
+                "input parameters to build",
+            ],
+            "positive_path": "invocation.parameters",
+            "negative_paths": ["ref.params[*].value", "tasks[*].name"],
+            "domain": "slsa",
+        },
+        # Config source
+        {
+            "queries": [
+                "pipeline config source",
+                "where pipeline definition came from",
+                "pipeline git source",
+            ],
+            "positive_path": "invocation.configSource",
+            "negative_paths": ["materials[*].uri", "subject[*].name"],
+            "domain": "slsa",
+        },
     ]
     
     # Manual query→helper mappings for hard cases
@@ -458,6 +534,8 @@ class RetrievalTrainingGenerator:
                 "SPDX SBOM attestations",
                 "access SPDX data",
                 "SBOM packages",
+                "loop over SPDX SBOMs",
+                "iterate SPDX packages",
             ],
             "positive_helper": "sbom.spdx_sboms",
             "negative_helpers": ["sbom.cyclonedx_sboms", "lib.pipelinerun_attestations"],
@@ -468,6 +546,8 @@ class RetrievalTrainingGenerator:
                 "CycloneDX SBOM",
                 "access CycloneDX",
                 "components in SBOM",
+                "loop over CycloneDX",
+                "iterate CycloneDX components",
             ],
             "positive_helper": "sbom.cyclonedx_sboms",
             "negative_helpers": ["sbom.spdx_sboms", "lib.pipelinerun_attestations"],
@@ -482,6 +562,186 @@ class RetrievalTrainingGenerator:
             "positive_helper": "sbom.purl_allowed_patterns",
             "negative_helpers": ["sbom.spdx_sboms", "lib.rule_data"],
             "domain": "sbom",
+        },
+        {
+            "queries": [
+                "disallowed packages in SBOM",
+                "check if package is blocked",
+                "package not allowed",
+                "SBOM disallowed packages list",
+            ],
+            "positive_helper": "sbom.disallowed_packages_provided",
+            "negative_helpers": ["sbom.spdx_sboms", "sbom.purl_allowed_patterns"],
+            "domain": "sbom",
+        },
+        # Image helpers - HEAVILY USED
+        {
+            "queries": [
+                "parse image reference",
+                "extract image registry",
+                "get image repo",
+                "parse container image URL",
+                "image reference parsing",
+            ],
+            "positive_helper": "lib.image.parse",
+            "negative_helpers": ["lib.image.str", "lib.image.equal_ref"],
+            "domain": "image",
+        },
+        {
+            "queries": [
+                "image reference string",
+                "full image URL",
+                "image to string",
+                "container image reference",
+                "image ref as string",
+            ],
+            "positive_helper": "lib.image.str",
+            "negative_helpers": ["lib.image.parse", "lib.image.equal_ref"],
+            "domain": "image",
+        },
+        {
+            "queries": [
+                "compare image references",
+                "check if images are equal",
+                "image ref equality",
+                "same image check",
+            ],
+            "positive_helper": "lib.image.equal_ref",
+            "negative_helpers": ["lib.image.parse", "lib.image.str"],
+            "domain": "image",
+        },
+        {
+            "queries": [
+                "is image index",
+                "check multi-arch image",
+                "image manifest list",
+            ],
+            "positive_helper": "lib.image.is_image_index",
+            "negative_helpers": ["lib.image.parse", "lib.image.str"],
+            "domain": "image",
+        },
+        {
+            "queries": [
+                "image ref from PURL",
+                "convert PURL to image",
+                "SBOM PURL to image reference",
+            ],
+            "positive_helper": "lib.sbom.image_ref_from_purl",
+            "negative_helpers": ["lib.image.parse", "sbom.spdx_sboms"],
+            "domain": "sbom",
+        },
+        {
+            "queries": [
+                "images with digests from tasks",
+                "build task image digests",
+                "get image digest from tekton task",
+            ],
+            "positive_helper": "lib.tekton.images_with_digests",
+            "negative_helpers": ["tekton.build_tasks", "tekton.bundle"],
+            "domain": "slsa",
+        },
+        {
+            "queries": [
+                "task step container image",
+                "image used in task step",
+                "step image reference",
+            ],
+            "positive_helper": "lib.tekton.task_step_image_ref",
+            "negative_helpers": ["lib.tekton.images_with_digests", "tekton.bundle"],
+            "domain": "slsa",
+        },
+        # Additional Tekton helpers
+        {
+            "queries": [
+                "get task result value",
+                "access task result",
+                "task output result",
+            ],
+            "positive_helper": "tekton.task_result",
+            "negative_helpers": ["tekton.task_param", "tekton.tasks"],
+            "domain": "slsa",
+        },
+        {
+            "queries": [
+                "get task parameter",
+                "task input parameter",
+                "access task param",
+            ],
+            "positive_helper": "tekton.task_param",
+            "negative_helpers": ["tekton.task_result", "tekton.bundle"],
+            "domain": "slsa",
+        },
+        {
+            "queries": [
+                "pre-build tasks",
+                "tasks before build",
+                "pre build task list",
+            ],
+            "positive_helper": "tekton.pre_build_tasks",
+            "negative_helpers": ["tekton.build_tasks", "tekton.tasks"],
+            "domain": "slsa",
+        },
+        {
+            "queries": [
+                "pipeline task name",
+                "get task name from pipeline",
+                "tekton pipeline task",
+            ],
+            "positive_helper": "tekton.pipeline_task_name",
+            "negative_helpers": ["tekton.task_name", "lib.task_in_pipelinerun"],
+            "domain": "slsa",
+        },
+        # Additional lib helpers
+        {
+            "queries": [
+                "result with term",
+                "result helper with term",
+                "violation with specific term",
+            ],
+            "positive_helper": "lib.result_helper_with_term",
+            "negative_helpers": ["lib.result_helper", "lib.result_helper_with_severity"],
+            "domain": "any",
+        },
+        {
+            "queries": [
+                "get results by name",
+                "find result named",
+                "results with specific name",
+            ],
+            "positive_helper": "lib.results_named",
+            "negative_helpers": ["lib.results_from_tests", "tekton.task_result"],
+            "domain": "slsa",
+        },
+        {
+            "queries": [
+                "tasks from pipelinerun",
+                "get all tasks in pipeline",
+                "extract tasks from pipeline run",
+            ],
+            "positive_helper": "lib.tasks_from_pipelinerun",
+            "negative_helpers": ["tekton.tasks", "lib.pipelinerun_attestations"],
+            "domain": "slsa",
+        },
+        {
+            "queries": [
+                "pipeline intention",
+                "check pipeline type",
+                "production vs staging pipeline",
+                "release pipeline intention",
+            ],
+            "positive_helper": "lib.pipeline_intention_match",
+            "negative_helpers": ["lib.rule_data", "lib.pipelinerun_attestations"],
+            "domain": "slsa",
+        },
+        {
+            "queries": [
+                "test results",
+                "results from test tasks",
+                "test task output",
+            ],
+            "positive_helper": "lib.results_from_tests",
+            "negative_helpers": ["lib.results_named", "tekton.task_result"],
+            "domain": "slsa",
         },
     ]
     
