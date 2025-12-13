@@ -1025,10 +1025,14 @@ class RetrievalTrainingGenerator:
                 # Determine domain
                 domain = self._detect_domain(instruction + output)
                 
-                # Create schema examples
+                # Create schema examples (with validation)
                 for positive_id in schemas_mentioned:
                     positive = self.schemas.get(positive_id)
                     if not positive:
+                        continue
+                    
+                    # VALIDATE: Skip if this is a bad query-schema pair
+                    if not self._is_valid_schema_example(instruction, positive):
                         continue
                     
                     # Find hard negatives
@@ -1069,25 +1073,48 @@ class RetrievalTrainingGenerator:
         print(f"  Generated {len(self.examples) - examples_before} examples from training data")
     
     def _extract_schemas_from_text(self, text: str) -> List[str]:
-        """Extract schema IDs mentioned in text."""
+        """Extract schema IDs mentioned in text - STRICT matching only."""
         found = []
         
-        # Look for schema paths in text
+        # Only match schemas that are EXPLICITLY mentioned by path
         for schema in self.schemas.values():
-            # Check if canonical path appears
+            # Check if canonical path appears (strict)
             path_pattern = schema.canonical_path.replace('[*]', r'\[\*\]').replace('.', r'\.')
             if re.search(path_pattern, text, re.IGNORECASE):
                 found.append(schema.schema_id)
                 continue
             
-            # Check if simplified path appears (last 2-3 segments)
+            # Check for explicit field references like "tasks[*].results" or "results[*].name"
             parts = schema.canonical_path.replace('$', '').strip('.').split('.')
             if len(parts) >= 2:
-                suffix = '.'.join(parts[-2:])
-                if suffix.replace('[*]', '') in text:
+                # Require explicit array notation or dotted path
+                last_two = '.'.join(parts[-2:]).replace('[*]', '')  # e.g., "results.name"
+                if f".{last_two}" in text or text.startswith(last_two):
                     found.append(schema.schema_id)
         
         return list(set(found))
+    
+    def _is_valid_schema_example(self, query: str, schema: SchemaInfo) -> bool:
+        """Validate that a query-schema pair makes semantic sense."""
+        query_lower = query.lower()
+        path_lower = schema.canonical_path.lower()
+        
+        # Block known bad mappings
+        bad_mappings = [
+            # "result" queries should NOT map to buildType, materials, subject
+            (["result", "output"], ["buildtype", "materials", "subject"]),
+            # "bundle" queries should NOT map to name, status
+            (["bundle", "pinned", "digest"], ["tasks[*].name", "tasks[*].status", "serviceaccount"]),
+            # "CVE" queries should NOT map to materials, subject
+            (["cve", "vulnerability", "severity"], ["materials", "subject[*].name"]),
+        ]
+        
+        for query_keywords, bad_paths in bad_mappings:
+            if any(kw in query_lower for kw in query_keywords):
+                if any(bp in path_lower for bp in bad_paths):
+                    return False
+        
+        return True
     
     def _extract_helpers_from_text(self, text: str) -> List[str]:
         """Extract helper IDs mentioned in text."""
