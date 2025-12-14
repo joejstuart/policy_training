@@ -165,7 +165,8 @@ def main():
     parser = argparse.ArgumentParser(description="Train a reranker model")
     parser.add_argument("--kb-dir", default="data/knowledge_base")
     parser.add_argument("--train-file", default="data/training/retrieval/curated_only.jsonl")
-    parser.add_argument("--base-model", default="cross-encoder/ms-marco-MiniLM-L-6-v2")
+    parser.add_argument("--base-model", default="microsoft/MiniLM-L6-H384-uncased",
+                        help="Base model for classification (not cross-encoder)")
     parser.add_argument("--output-dir", default="models/reranker")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=16)
@@ -179,10 +180,12 @@ def main():
     examples = load_training_data(Path(args.train_file))
     
     # Load tokenizer and model
-    print(f"\nLoading base model: {args.base_model}")
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
+    # Use a BERT model as base (not cross-encoder which has different architecture)
+    base_model = "microsoft/MiniLM-L6-H384-uncased"
+    print(f"\nLoading base model: {base_model}")
+    tokenizer = AutoTokenizer.from_pretrained(base_model)
     model = AutoModelForSequenceClassification.from_pretrained(
-        args.base_model,
+        base_model,
         num_labels=2,  # Binary classification: relevant or not
     )
     
