@@ -407,6 +407,7 @@ def main():
     parser.add_argument("--kb-dir", default="data/knowledge_base")
     parser.add_argument("--train-file", default="data/training/retrieval/retrieval_train.jsonl")
     parser.add_argument("--eval-file", default="data/training/retrieval/retrieval_eval.jsonl")
+    parser.add_argument("--curated-eval", action="store_true", help="Use curated_eval.jsonl for cleaner evaluation")
     parser.add_argument("--embedding-model", default="BAAI/bge-base-en-v1.5")
     parser.add_argument("--reranker-model", default="cross-encoder/ms-marco-MiniLM-L-6-v2")
     parser.add_argument("--output-dir", default="models/id-selector-simple")
@@ -476,7 +477,12 @@ def main():
     print("\n=== Evaluation ===")
     
     # Load eval data if available
-    eval_file = Path(args.eval_file)
+    if args.curated_eval:
+        eval_file = Path("data/training/retrieval/curated_eval.jsonl")
+        print(f"Using curated eval set: {eval_file}")
+    else:
+        eval_file = Path(args.eval_file)
+    
     if eval_file.exists():
         eval_examples = load_training_data(eval_file)
     else:
