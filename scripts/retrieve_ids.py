@@ -158,8 +158,17 @@ class IDRetriever:
         faiss_index.add(embeddings)
         
         # Load reranker
-        print(f"Loading reranker: {reranker_path}")
-        reranker = CrossEncoder(reranker_path, max_length=512)
+        # Note: sentence-transformers CrossEncoder doesn't save in a loadable format
+        # So we always use the base model. The fine-tuning helps during training evaluation
+        # but doesn't persist. For production, consider using transformers directly.
+        base_reranker = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        
+        if reranker_path and Path(reranker_path).exists():
+            print(f"  Note: Custom reranker path provided but CrossEncoder save format")
+            print(f"  is not compatible with loading. Using base model instead.")
+        
+        print(f"Loading reranker: {base_reranker}")
+        reranker = CrossEncoder(base_reranker, max_length=512)
         
         instance = cls(
             corpus=corpus,

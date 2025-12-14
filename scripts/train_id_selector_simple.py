@@ -253,10 +253,12 @@ class CrossEncoderReranker:
             train_dataloader=train_dataloader,
             epochs=epochs,
             warmup_steps=100,
-            output_path=output_dir,
+            output_path=None,  # Don't save during training
             show_progress_bar=True,
         )
         
+        # Save model properly
+        self.model.save(output_dir)
         print(f"Model saved to {output_dir}")
     
     def rerank(
