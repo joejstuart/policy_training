@@ -300,7 +300,9 @@ def evaluate(
     """Evaluate retrieval + reranking."""
     
     recalls = {k: [] for k in k_values}
+    retrieval_only_recalls = {k: [] for k in k_values}
     mrrs = []
+    retrieval_mrrs = []
     
     # Track candidate generation quality
     candidate_recalls = []
@@ -323,10 +325,24 @@ def evaluate(
         in_candidates = ex.positive_id in candidate_ids
         candidate_recalls.append(1.0 if in_candidates else 0.0)
         
+        # Evaluate RETRIEVAL ONLY (before reranking)
+        for k in k_values:
+            if ex.positive_id in candidate_ids[:k]:
+                retrieval_only_recalls[k].append(1.0)
+            else:
+                retrieval_only_recalls[k].append(0.0)
+        
+        for i, doc_id in enumerate(candidate_ids):
+            if doc_id == ex.positive_id:
+                retrieval_mrrs.append(1.0 / (i + 1))
+                break
+        else:
+            retrieval_mrrs.append(0.0)
+        
         # Rerank
         reranked = reranker.rerank(ex.query, candidates, corpus, top_k=max(k_values))
         
-        # Evaluate
+        # Evaluate AFTER RERANKING
         retrieved_ids = [doc_id for doc_id, _ in reranked]
         
         for k in k_values:
@@ -347,16 +363,32 @@ def evaluate(
             if len(misses) < 5:
                 misses.append((ex.query[:80], ex.positive_id, in_candidates))
     
-    results = {f"recall@{k}": np.mean(recalls[k]) for k in k_values}
-    results["mrr"] = np.mean(mrrs)
+    # Results with both retrieval-only and reranked
+    results = {}
     results["candidate_recall@100"] = np.mean(candidate_recalls)
     
-    # Print diagnostics
+    # Print comparison
     print(f"\n  Candidate generation recall@100: {results['candidate_recall@100']:.4f}")
-    print(f"  (This is the upper bound - if target not in candidates, reranker can't help)")
+    print(f"\n  Comparison (retrieval-only vs reranked):")
+    print(f"  {'Metric':<15} {'Retrieval':>12} {'Reranked':>12} {'Delta':>10}")
+    print(f"  {'-'*50}")
+    
+    for k in k_values:
+        ret_val = np.mean(retrieval_only_recalls[k])
+        rer_val = np.mean(recalls[k])
+        delta = rer_val - ret_val
+        print(f"  {'recall@'+str(k):<15} {ret_val:>12.4f} {rer_val:>12.4f} {delta:>+10.4f}")
+        results[f"retrieval_recall@{k}"] = ret_val
+        results[f"reranked_recall@{k}"] = rer_val
+    
+    ret_mrr = np.mean(retrieval_mrrs)
+    rer_mrr = np.mean(mrrs)
+    print(f"  {'MRR':<15} {ret_mrr:>12.4f} {rer_mrr:>12.4f} {rer_mrr - ret_mrr:>+10.4f}")
+    results["retrieval_mrr"] = ret_mrr
+    results["reranked_mrr"] = rer_mrr
     
     if misses and verbose:
-        print("\n  Sample misses:")
+        print("\n  Sample misses (after reranking):")
         for query, target, in_cand in misses:
             status = "in candidates" if in_cand else "NOT in candidates"
             print(f"    Query: {query}...")
