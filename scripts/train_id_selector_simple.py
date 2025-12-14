@@ -52,7 +52,7 @@ class TrainingExample:
 
 
 def load_corpus(kb_dir: Path) -> Dict[str, Document]:
-    """Load documents from knowledge base."""
+    """Load documents from knowledge base with enriched text for better retrieval."""
     corpus = {}
     
     helpers_file = kb_dir / "helpers.jsonl"
@@ -62,7 +62,32 @@ def load_corpus(kb_dir: Path) -> Dict[str, Document]:
                 continue
             data = json.loads(line)
             doc_id = data.get('id', '')
-            text = f"{doc_id}: {data.get('signature', '')} - {data.get('description', '')}"
+            
+            # Enrich text with multiple representations for better matching
+            parts = [
+                doc_id,  # Full ID
+                doc_id.replace('.', ' ').replace('_', ' '),  # ID as words
+                data.get('signature', ''),
+                data.get('description', ''),
+            ]
+            
+            # Add keywords from ID
+            id_parts = doc_id.split('.')
+            parts.extend(id_parts)  # e.g., "lib", "tekton", "tasks"
+            
+            # Add common aliases/related terms
+            if 'task' in doc_id.lower():
+                parts.extend(['tasks', 'pipeline', 'tekton', 'pipelinerun'])
+            if 'attestation' in doc_id.lower():
+                parts.extend(['attestation', 'provenance', 'slsa'])
+            if 'result' in doc_id.lower():
+                parts.extend(['result', 'output', 'test', 'report'])
+            if 'sbom' in doc_id.lower() or 'spdx' in doc_id.lower():
+                parts.extend(['sbom', 'spdx', 'cyclonedx', 'package', 'license'])
+            if 'bundle' in doc_id.lower():
+                parts.extend(['bundle', 'pinned', 'digest', 'oci'])
+            
+            text = ' '.join(filter(None, parts))
             corpus[doc_id] = Document(id=doc_id, text=text, doc_type="helper")
     
     schemas_file = kb_dir / "schemas.jsonl"
@@ -72,7 +97,18 @@ def load_corpus(kb_dir: Path) -> Dict[str, Document]:
                 continue
             data = json.loads(line)
             doc_id = data.get('schema_id', '')
-            text = f"{data.get('canonical_path', '')}: {data.get('description', '')} ({data.get('attestation_type', '')})"
+            
+            parts = [
+                data.get('canonical_path', ''),
+                data.get('description', ''),
+                data.get('attestation_type', ''),
+            ]
+            
+            # Add keywords
+            keywords = data.get('keywords', [])
+            parts.extend(keywords)
+            
+            text = ' '.join(filter(None, parts))
             corpus[doc_id] = Document(id=doc_id, text=text, doc_type="schema")
     
     print(f"Loaded {len(corpus)} documents")
@@ -126,21 +162,26 @@ class HybridRetriever:
         faiss.normalize_L2(embeddings)
         self.index.add(embeddings)
     
-    def retrieve(self, query: str, top_k: int = 50) -> List[Tuple[str, float]]:
-        """Retrieve candidates."""
+    def retrieve(self, query: str, top_k: int = 100) -> List[Tuple[str, float]]:
+        """Retrieve candidates using hybrid BM25 + embedding search."""
         results = {}
+        
+        # For small corpus (151 docs), retrieve more to ensure high recall
+        bm25_k = min(top_k, len(self.doc_ids))
+        emb_k = min(top_k, len(self.doc_ids))
         
         # BM25
         tokens = query.lower().split()
         bm25_scores = self.bm25.get_scores(tokens)
-        for idx in np.argsort(bm25_scores)[-top_k//2:][::-1]:
+        max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1
+        for idx in np.argsort(bm25_scores)[-bm25_k:][::-1]:
             doc_id = self.doc_ids[idx]
-            results[doc_id] = float(bm25_scores[idx])
+            results[doc_id] = float(bm25_scores[idx]) / max_bm25  # Normalize
         
         # Embeddings
         query_emb = self.encoder.encode([query])
         faiss.normalize_L2(query_emb)
-        scores, indices = self.index.search(query_emb, top_k//2)
+        scores, indices = self.index.search(query_emb, emb_k)
         
         for i, idx in enumerate(indices[0]):
             if idx >= 0:
@@ -274,8 +315,8 @@ def evaluate(
         if ex.positive_id not in corpus:
             continue
         
-        # Retrieve
-        candidates = retriever.retrieve(ex.query, top_k=50)
+        # Retrieve - use 100 candidates for small corpus
+        candidates = retriever.retrieve(ex.query, top_k=100)
         candidate_ids = [doc_id for doc_id, _ in candidates]
         
         # Track if target is in candidates at all
@@ -308,10 +349,10 @@ def evaluate(
     
     results = {f"recall@{k}": np.mean(recalls[k]) for k in k_values}
     results["mrr"] = np.mean(mrrs)
-    results["candidate_recall@50"] = np.mean(candidate_recalls)
+    results["candidate_recall@100"] = np.mean(candidate_recalls)
     
     # Print diagnostics
-    print(f"\n  Candidate generation recall@50: {results['candidate_recall@50']:.4f}")
+    print(f"\n  Candidate generation recall@100: {results['candidate_recall@100']:.4f}")
     print(f"  (This is the upper bound - if target not in candidates, reranker can't help)")
     
     if misses and verbose:
@@ -369,7 +410,17 @@ def main():
     
     if args.eval_only and output_dir.exists():
         print(f"\n=== Loading Reranker from {output_dir} ===")
-        reranker = CrossEncoderReranker(str(output_dir))
+        # CrossEncoder saves config.json - check if it's a valid model
+        config_file = output_dir / "config.json"
+        if config_file.exists():
+            try:
+                reranker = CrossEncoderReranker(str(output_dir))
+            except ValueError:
+                print("  Saved model format incompatible, using base model for eval")
+                reranker = CrossEncoderReranker(args.reranker_model)
+        else:
+            print("  No saved model found, using base model for eval")
+            reranker = CrossEncoderReranker(args.reranker_model)
     else:
         print("\n=== Training Reranker ===")
         reranker = CrossEncoderReranker(args.reranker_model)
