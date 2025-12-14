@@ -22,8 +22,10 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 import argparse
 
-from sentence_transformers import SentenceTransformer, CrossEncoder
+from sentence_transformers import SentenceTransformer
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from rank_bm25 import BM25Okapi
+import torch
 import faiss
 import numpy as np
 
@@ -53,6 +55,39 @@ class RetrievalResult:
         return "\n".join(lines)
 
 
+class Reranker:
+    """Reranker using transformers model."""
+    
+    def __init__(self, model, tokenizer, device: str = "cpu"):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.model.to(device)
+        self.model.eval()
+    
+    def predict(self, pairs: List[Tuple[str, str]]) -> np.ndarray:
+        """Score query-document pairs."""
+        scores = []
+        
+        with torch.no_grad():
+            for query, doc in pairs:
+                inputs = self.tokenizer(
+                    query, doc,
+                    truncation=True,
+                    max_length=256,
+                    padding=True,
+                    return_tensors="pt",
+                ).to(self.device)
+                
+                outputs = self.model(**inputs)
+                # Get probability of class 1 (relevant)
+                probs = torch.softmax(outputs.logits, dim=-1)
+                score = probs[0, 1].item()
+                scores.append(score)
+        
+        return np.array(scores)
+
+
 class IDRetriever:
     """Retrieve relevant helper and schema IDs for a query."""
     
@@ -60,7 +95,7 @@ class IDRetriever:
         self,
         corpus: Dict[str, str],
         embedding_model: SentenceTransformer,
-        reranker: CrossEncoder,
+        reranker: Reranker,
         bm25: BM25Okapi,
         doc_ids: List[str],
         faiss_index,
@@ -158,17 +193,37 @@ class IDRetriever:
         faiss_index.add(embeddings)
         
         # Load reranker
-        # Note: sentence-transformers CrossEncoder doesn't save in a loadable format
-        # So we always use the base model. The fine-tuning helps during training evaluation
-        # but doesn't persist. For production, consider using transformers directly.
-        base_reranker = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        # Detect device
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
         
+        # Try to load fine-tuned model, fall back to base
         if reranker_path and Path(reranker_path).exists():
-            print(f"  Note: Custom reranker path provided but CrossEncoder save format")
-            print(f"  is not compatible with loading. Using base model instead.")
+            model_path = reranker_path
+            print(f"Loading fine-tuned reranker: {model_path}")
+        else:
+            model_path = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            print(f"Loading base reranker: {model_path}")
         
-        print(f"Loading reranker: {base_reranker}")
-        reranker = CrossEncoder(base_reranker, max_length=512)
+        try:
+            reranker_model = AutoModelForSequenceClassification.from_pretrained(model_path)
+            reranker_tokenizer = AutoTokenizer.from_pretrained(model_path)
+            reranker = Reranker(reranker_model, reranker_tokenizer, device)
+            print(f"  Reranker loaded on {device}")
+        except Exception as e:
+            print(f"  Error loading reranker: {e}")
+            print(f"  Falling back to base model")
+            reranker_model = AutoModelForSequenceClassification.from_pretrained(
+                "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            )
+            reranker_tokenizer = AutoTokenizer.from_pretrained(
+                "cross-encoder/ms-marco-MiniLM-L-6-v2"
+            )
+            reranker = Reranker(reranker_model, reranker_tokenizer, device)
         
         instance = cls(
             corpus=corpus,
