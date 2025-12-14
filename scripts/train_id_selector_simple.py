@@ -296,6 +296,7 @@ def evaluate(
     corpus: Dict[str, Document],
     k_values: List[int] = [1, 3, 5, 10],
     verbose: bool = False,
+    rerank_all: bool = False,
 ) -> Dict[str, float]:
     """Evaluate retrieval + reranking."""
     
@@ -317,8 +318,12 @@ def evaluate(
         if ex.positive_id not in corpus:
             continue
         
-        # Retrieve - use 100 candidates for small corpus
-        candidates = retriever.retrieve(ex.query, top_k=100)
+        # Retrieve candidates
+        if rerank_all:
+            # For small corpus, rerank ALL documents (100% candidate recall)
+            candidates = [(doc_id, 1.0) for doc_id in corpus.keys()]
+        else:
+            candidates = retriever.retrieve(ex.query, top_k=100)
         candidate_ids = [doc_id for doc_id, _ in candidates]
         
         # Track if target is in candidates at all
@@ -410,6 +415,7 @@ def main():
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--max-train", type=int, default=10000, help="Max training examples")
     parser.add_argument("--verbose", action="store_true", help="Show detailed diagnostics")
+    parser.add_argument("--rerank-all", action="store_true", help="Rerank all documents (for small corpus)")
     
     args = parser.parse_args()
     
@@ -477,7 +483,10 @@ def main():
         print("Using train split for eval")
         eval_examples = examples
     
-    results = evaluate(retriever, reranker, eval_examples, corpus, verbose=args.verbose)
+    results = evaluate(
+        retriever, reranker, eval_examples, corpus, 
+        verbose=args.verbose, rerank_all=args.rerank_all
+    )
     
     print("\nResults:")
     for k, v in sorted(results.items()):
