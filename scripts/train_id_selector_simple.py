@@ -254,18 +254,33 @@ def evaluate(
     examples: List[TrainingExample],
     corpus: Dict[str, Document],
     k_values: List[int] = [1, 3, 5, 10],
+    verbose: bool = False,
 ) -> Dict[str, float]:
     """Evaluate retrieval + reranking."""
     
     recalls = {k: [] for k in k_values}
     mrrs = []
     
+    # Track candidate generation quality
+    candidate_recalls = []
+    
     # Sample for speed
     sample = random.sample(examples, min(500, len(examples)))
     
+    misses = []
+    
     for ex in sample:
+        # Check if target exists in corpus
+        if ex.positive_id not in corpus:
+            continue
+        
         # Retrieve
         candidates = retriever.retrieve(ex.query, top_k=50)
+        candidate_ids = [doc_id for doc_id, _ in candidates]
+        
+        # Track if target is in candidates at all
+        in_candidates = ex.positive_id in candidate_ids
+        candidate_recalls.append(1.0 if in_candidates else 0.0)
         
         # Rerank
         reranked = reranker.rerank(ex.query, candidates, corpus, top_k=max(k_values))
@@ -280,15 +295,31 @@ def evaluate(
                 recalls[k].append(0.0)
         
         # MRR
+        found = False
         for i, doc_id in enumerate(retrieved_ids):
             if doc_id == ex.positive_id:
                 mrrs.append(1.0 / (i + 1))
+                found = True
                 break
-        else:
+        if not found:
             mrrs.append(0.0)
+            if len(misses) < 5:
+                misses.append((ex.query[:80], ex.positive_id, in_candidates))
     
     results = {f"recall@{k}": np.mean(recalls[k]) for k in k_values}
     results["mrr"] = np.mean(mrrs)
+    results["candidate_recall@50"] = np.mean(candidate_recalls)
+    
+    # Print diagnostics
+    print(f"\n  Candidate generation recall@50: {results['candidate_recall@50']:.4f}")
+    print(f"  (This is the upper bound - if target not in candidates, reranker can't help)")
+    
+    if misses and verbose:
+        print("\n  Sample misses:")
+        for query, target, in_cand in misses:
+            status = "in candidates" if in_cand else "NOT in candidates"
+            print(f"    Query: {query}...")
+            print(f"    Target: {target} ({status})")
     
     return results
 
@@ -305,6 +336,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--max-train", type=int, default=10000, help="Max training examples")
+    parser.add_argument("--verbose", action="store_true", help="Show detailed diagnostics")
     
     args = parser.parse_args()
     
@@ -362,7 +394,7 @@ def main():
         print("Using train split for eval")
         eval_examples = examples
     
-    results = evaluate(retriever, reranker, eval_examples, corpus)
+    results = evaluate(retriever, reranker, eval_examples, corpus, verbose=args.verbose)
     
     print("\nResults:")
     for k, v in sorted(results.items()):
